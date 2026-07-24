@@ -1,0 +1,10 @@
+# Development / test dependencies for CRUD API
+# Python 3.13 target runtime (arm64)
+# Versions resolved 2026-07-24 — keep in sync with requirements.txt (moto must be compatible with boto3 version)
+#
+# Compatibility note: moto==5.2.2 requires boto3>=1.9.201; boto3==1.43.56 satisfies that constraint.
+
+pytest==9.1.1
+moto[dynamodb]==5.2.2
+hypothesis==6.161.2
+bandit==1.9.4
