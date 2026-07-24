@@ -1,0 +1,5 @@
+# Runtime dependencies for CRUD API Lambda functions
+# Python 3.13 target runtime (arm64)
+# Versions resolved 2026-07-24 — update via Context7/MCP before next major release
+
+boto3==1.43.56
