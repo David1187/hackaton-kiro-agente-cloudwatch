@@ -1,0 +1,7 @@
+# CDK dependencies for the infrastructure project
+# Python 3.13 target — AWS CDK v2
+# Versions resolved 2026-07-24
+
+aws-cdk-lib==2.200.0
+constructs>=10.0.0,<11.0.0
+pyyaml==6.0.2

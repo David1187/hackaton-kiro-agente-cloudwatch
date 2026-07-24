@@ -1,0 +1,109 @@
+openapi: "3.0.1"
+info:
+  title: TodoCrudApi
+  description: "Todo CRUD API — Hackathon project"
+  version: "1.0.0"
+x-amazon-apigateway-api-key-source: HEADER
+
+paths:
+  /tasks:
+    post:
+      summary: Create a new Task
+      operationId: createTask
+      security:
+        - api_key: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${CreateFunctionArn}"
+        passthroughBehavior: when_no_match
+      responses:
+        "201":
+          description: Task created successfully
+        "400":
+          description: Validation error
+        "500":
+          description: Internal server error
+    get:
+      summary: List all Tasks
+      operationId: listTasks
+      security:
+        - api_key: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${ListFunctionArn}"
+        passthroughBehavior: when_no_match
+      responses:
+        "200":
+          description: List of Tasks
+        "500":
+          description: Internal server error
+
+  /tasks/{task_id}:
+    parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get a Task by ID
+      operationId: getTask
+      security:
+        - api_key: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${GetFunctionArn}"
+        passthroughBehavior: when_no_match
+      responses:
+        "200":
+          description: Task found
+        "404":
+          description: Task not found
+        "500":
+          description: Internal server error
+    put:
+      summary: Update a Task
+      operationId: updateTask
+      security:
+        - api_key: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${UpdateFunctionArn}"
+        passthroughBehavior: when_no_match
+      responses:
+        "200":
+          description: Task updated
+        "400":
+          description: Validation error
+        "404":
+          description: Task not found
+        "500":
+          description: Internal server error
+    delete:
+      summary: Delete a Task
+      operationId: deleteTask
+      security:
+        - api_key: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${DeleteFunctionArn}"
+        passthroughBehavior: when_no_match
+      responses:
+        "200":
+          description: Task deleted
+        "404":
+          description: Task not found
+        "500":
+          description: Internal server error
+
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: x-api-key
+      in: header
