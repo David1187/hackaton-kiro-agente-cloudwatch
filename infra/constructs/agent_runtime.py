@@ -67,7 +67,7 @@ def on_create(props):
                 },
             },
             "runtime": "PYTHON_3_13",
-            "entryPoint": ["python", "-m", "agent"],
+            "entryPoint": ["agent.py"],
         },
     }
 
@@ -125,7 +125,7 @@ def on_update(event, props):
                 },
             },
             "runtime": "PYTHON_3_13",
-            "entryPoint": ["python", "-m", "agent"],
+            "entryPoint": ["agent.py"],
         },
     }
 
@@ -340,6 +340,15 @@ class AgentRuntime(Construct):
                 resources=[self.runtime_role.role_arn],
             )
         )
+        # CreateAgentRuntime requires creating a service-linked role for AgentCore
+        provider_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="CreateServiceLinkedRole",
+                effect=iam.Effect.ALLOW,
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=["*"],
+            )
+        )
         # The provider Lambda needs S3 read access to verify the code asset exists
         self.code_asset.grant_read(provider_fn)
 
@@ -357,7 +366,7 @@ class AgentRuntime(Construct):
             service_token=provider.service_token,
             removal_policy=cdk.RemovalPolicy.DESTROY,
             properties={
-                "AgentRuntimeName": "self-healing-agent",
+                "AgentRuntimeName": "self_healing_agent",
                 "RoleArn": self.runtime_role.role_arn,
                 "S3Bucket": self.code_asset.s3_bucket_name,
                 "S3Key": self.code_asset.s3_object_key,

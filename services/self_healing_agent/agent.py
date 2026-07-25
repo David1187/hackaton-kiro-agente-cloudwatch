@@ -22,11 +22,33 @@ from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
 from strands.tools.mcp.mcp_client import StreamableHTTPTransport
 
-from .branch_naming import build_fix_branch_name
-from .config import resolve_model_id
-from .logs_client import derive_function_name, derive_log_group, get_latest_stack_trace
-from .pr_body import build_pr_description, build_pr_title
-from .repo_tag import InvalidRepoTagError, parse_repo_tag
+# Dual-mode imports: support both package import (from .module) and direct
+# script execution (from module). This allows entryPoint=['python', 'agent.py']
+# while keeping tests that import via 'from services.self_healing_agent.x' working.
+try:
+    from .branch_naming import build_fix_branch_name
+except ImportError:
+    from branch_naming import build_fix_branch_name
+
+try:
+    from .config import resolve_model_id
+except ImportError:
+    from config import resolve_model_id
+
+try:
+    from .logs_client import derive_function_name, derive_log_group, get_latest_stack_trace
+except ImportError:
+    from logs_client import derive_function_name, derive_log_group, get_latest_stack_trace
+
+try:
+    from .pr_body import build_pr_description, build_pr_title
+except ImportError:
+    from pr_body import build_pr_description, build_pr_title
+
+try:
+    from .repo_tag import InvalidRepoTagError, parse_repo_tag
+except ImportError:
+    from repo_tag import InvalidRepoTagError, parse_repo_tag
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -245,9 +267,9 @@ def handle_event(event: dict) -> dict:
 # --- AgentCore Runtime Entrypoint ---
 
 try:
-    from bedrock_agentcore.runtime import RuntimeApp
+    from bedrock_agentcore import BedrockAgentCoreApp
 
-    app = RuntimeApp()
+    app = BedrockAgentCoreApp()
 
     @app.entrypoint
     def invoke(event: dict) -> dict:
@@ -264,3 +286,14 @@ except ImportError:
         "Use handle_event() directly for testing."
     )
     app = None
+
+
+if __name__ == "__main__":
+    if app is not None:
+        app.run()
+    else:
+        # Fallback: if bedrock-agentcore is not installed, print usage info
+        print(
+            "bedrock-agentcore SDK not installed. "
+            "Install it to run the AgentCore Runtime server."
+        )
