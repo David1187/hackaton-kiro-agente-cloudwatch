@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""CDK Application entrypoint — deploys the Todo CRUD API infrastructure.
+"""CDK Application entrypoint — deploys the Todo CRUD API and Self-Healing Agent.
 
-Stacks are split by state:
+Stacks are split by state and domain:
   - StatefulStack: DynamoDB table (stateful, survives Lambda redeployments)
   - StatelessStack: Lambdas, API Gateway, observability (can be torn down safely)
+  - AgentStack: Self-Healing Agent (AgentCore Runtime, Gateway, EventBridge)
 """
 import aws_cdk as cdk
 
+from infra.stacks.agent_stack import AgentStack
 from infra.stacks.stateful_stack import StatefulStack
 from infra.stacks.stateless_stack import StatelessStack
 
@@ -21,10 +23,19 @@ env = cdk.Environment(region="eu-west-1")
 
 stateful = StatefulStack(app, "TodoCrudStatefulStack", env=env)
 
-StatelessStack(
+stateless = StatelessStack(
     app,
     "TodoCrudStatelessStack",
     table=stateful.table,
+    env=env,
+)
+
+AgentStack(
+    app,
+    "SelfHealingAgentStack",
+    alarm_arns=stateless.alarm_arns,
+    alarm_names=stateless.alarm_names,
+    log_group_names=stateless.log_group_names,
     env=env,
 )
 

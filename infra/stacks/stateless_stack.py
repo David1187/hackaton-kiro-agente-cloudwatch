@@ -118,6 +118,10 @@ class StatelessStack(cdk.Stack):
         # ---------------------------------------------------------------
         # 7.5 — Observability: Log Group, Metric Filter, Alarm per Lambda
         # ---------------------------------------------------------------
+        self._alarm_arns: list[str] = []
+        self._alarm_names: list[str] = []
+        self._log_group_names: list[str] = []
+
         for name, fn in lambdas.items():
             log_group = logs.LogGroup(
                 self,
@@ -126,12 +130,13 @@ class StatelessStack(cdk.Stack):
                 retention=logs.RetentionDays.ONE_WEEK,
                 removal_policy=cdk.RemovalPolicy.DESTROY,
             )
+            self._log_group_names.append(f"/aws/lambda/{fn.function_name}")
 
             metric_filter = logs.MetricFilter(
                 self,
                 f"MetricFilter{name.capitalize()}",
                 log_group=log_group,
-                filter_pattern=logs.FilterPattern.literal("ERROR:"),
+                filter_pattern=logs.FilterPattern.literal('"ERROR:"'),
                 metric_namespace="TodoCrudApi/Errors",
                 metric_name=f"{name.capitalize()}ErrorCount",
                 metric_value="1",
@@ -143,7 +148,7 @@ class StatelessStack(cdk.Stack):
                 period=cdk.Duration.minutes(1),
             )
 
-            cloudwatch.Alarm(
+            alarm = cloudwatch.Alarm(
                 self,
                 f"Alarm{name.capitalize()}",
                 metric=metric,
@@ -153,6 +158,8 @@ class StatelessStack(cdk.Stack):
                 alarm_description=f"Error detected in {name} Lambda handler",
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
             )
+            self._alarm_arns.append(alarm.alarm_arn)
+            self._alarm_names.append(alarm.alarm_name)
 
         # ---------------------------------------------------------------
         # 7.4 — API Gateway REST API (OpenAPI with CDK token substitution)
@@ -243,3 +250,18 @@ class StatelessStack(cdk.Stack):
             return obj
 
         return _substitute(spec)
+
+    @property
+    def alarm_arns(self) -> list[str]:
+        """CloudWatch Alarm ARNs for the CRUD Lambda error alarms."""
+        return self._alarm_arns
+
+    @property
+    def alarm_names(self) -> list[str]:
+        """CloudWatch Alarm names for EventBridge pattern matching."""
+        return self._alarm_names
+
+    @property
+    def log_group_names(self) -> list[str]:
+        """Log Group names for the CRUD Lambdas."""
+        return self._log_group_names
