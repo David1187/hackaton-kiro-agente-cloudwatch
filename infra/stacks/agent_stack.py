@@ -42,9 +42,9 @@ import botocore.exceptions
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-client = boto3.client("bedrock-agent-runtime")
+client = boto3.client("bedrock-agentcore")
 
-AGENT_RUNTIME_ID = os.environ["AGENT_RUNTIME_ID"]
+AGENT_RUNTIME_ARN = os.environ["AGENT_RUNTIME_ARN"]
 AGENT_RUNTIME_ENDPOINT_ID = os.environ["AGENT_RUNTIME_ENDPOINT_ID"]
 
 
@@ -52,11 +52,12 @@ def handler(event, context):
     \"\"\"Forward EventBridge alarm event to AgentCore Runtime.\"\"\"
     logger.info("Received EventBridge event: %s", json.dumps(event))
     try:
-        response = client.invoke_agent(
-            agentId=AGENT_RUNTIME_ID,
-            agentAliasId=AGENT_RUNTIME_ENDPOINT_ID,
-            sessionId=context.aws_request_id,
-            inputText=json.dumps(event),
+        payload = json.dumps({"input": {"prompt": json.dumps(event)}})
+        response = client.invoke_agent_runtime(
+            agentRuntimeArn=AGENT_RUNTIME_ARN,
+            runtimeSessionId=context.aws_request_id + "0" * (33 - len(context.aws_request_id)),
+            payload=payload,
+            qualifier=AGENT_RUNTIME_ENDPOINT_ID,
         )
         logger.info("AgentCore invocation successful")
         return {"statusCode": 200, "body": "Agent invoked"}
@@ -133,7 +134,8 @@ class AgentStack(cdk.Stack):
             description="Bridge: forwards EventBridge alarm events to AgentCore Runtime",
             environment={
                 "AGENT_RUNTIME_ID": runtime.runtime_id,
-                "AGENT_RUNTIME_ENDPOINT_ID": runtime.endpoint_arn,
+                "AGENT_RUNTIME_ENDPOINT_ID": "DEFAULT",
+                "AGENT_RUNTIME_ARN": runtime.runtime_arn,
             },
         )
 
@@ -143,10 +145,9 @@ class AgentStack(cdk.Stack):
                 sid="InvokeAgentRuntime",
                 effect=iam.Effect.ALLOW,
                 actions=[
-                    "bedrock:InvokeAgent",
-                    "bedrock:InvokeAgentWithResponseStream",
+                    "bedrock-agentcore:InvokeAgentRuntime",
                 ],
-                resources=[runtime.runtime_arn],
+                resources=["*"],
             )
         )
 

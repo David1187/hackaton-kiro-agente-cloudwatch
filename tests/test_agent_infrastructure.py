@@ -241,17 +241,17 @@ class TestBridgeLambda:
         assert len(resources) >= 1, "Expected at least one bridge Lambda function"
 
     def test_bridge_lambda_has_agent_runtime_env(self, template):
-        """Bridge Lambda has AGENT_RUNTIME_ID environment variable."""
+        """Bridge Lambda has AGENT_RUNTIME_ARN environment variable."""
         resources = template.find_resources("AWS::Lambda::Function")
         found_bridge = False
         for logical_id, resource in resources.items():
             env_vars = resource.get("Properties", {}).get("Environment", {}).get("Variables", {})
-            if "AGENT_RUNTIME_ID" in env_vars:
+            if "AGENT_RUNTIME_ARN" in env_vars:
                 found_bridge = True
                 assert "AGENT_RUNTIME_ENDPOINT_ID" in env_vars, (
                     "Bridge Lambda missing AGENT_RUNTIME_ENDPOINT_ID env var"
                 )
-        assert found_bridge, "No Lambda with AGENT_RUNTIME_ID env var found"
+        assert found_bridge, "No Lambda with AGENT_RUNTIME_ARN env var found"
 
 
 class TestNoContainers:
