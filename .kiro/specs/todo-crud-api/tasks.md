@@ -1,4 +1,4 @@
-# Implementation Plan: todo-crud-api
+﻿# Implementation Plan: todo-crud-api
 
 ## Overview
 
@@ -144,42 +144,56 @@ Las pruebas basadas en propiedades (`hypothesis` + `moto`) implementan las 17 Co
 - [x] 5. Checkpoint - Asegurar que pasan los tests de handlers y propiedades
   - Ensure all tests pass, ask the user if questions arise.
 
-- [x] 6. Implementar el Código_Sembrado (estado inicial con errores controlados)
+- [x] 6. Implementar el Código_Sembrado (errores controlados, desplegados de forma permanente)
   - [x] 6.1 Implementar las variantes sembradas de los handlers (`services/crud_api/seeded/`)
-    - Reproducir de forma aislada y determinista los Seeded_Errors SE-1…SE-9 del catálogo, cada uno disparable por su entrada documentada y produciendo siempre la misma excepción detectable por el Metric Filter (`ERROR:`)
-    - Mantener cada Seeded_Error aislado en su handler para poder dispararlos de forma independiente
-    - _Requirements: 10.1, 10.3, 10.4, 10.5, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 11.9_
+    - Reproducir de forma aislada y determinista los Seeded_Errors SE-1…SE-9 del catálogo, cada uno disparable por su entrada documentada
+    - Mantener cada Seeded_Error aislado en su módulo de referencia
+    - **Retirado en la tarea 9:** el paquete se eliminó por redundante una vez los errores quedaron fusionados en los handlers desplegados (6.4)
+    - _Requirements: 10.1, 10.3, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 11.9_
 
   - [x] 6.2 Documentar el catálogo en `services/crud_api/seeded/SEEDED_ERRORS.md`
-    - Declarar el estado inicial como intencional y controlado; por cada Seeded_Error documentar operación, entrada disparadora, excepción esperada y el número de requisito del Comportamiento_Objetivo (1–9)
-    - _Requirements: 10.2, 10.6_
+    - Declarar el código sembrado como intencional y controlado; por cada Seeded_Error documentar operación, entrada disparadora y el número de requisito del Comportamiento_Objetivo (1–9)
+    - **Retirado en la tarea 9:** la documentación de referencia del catálogo pasó a la sección 6 de `design.md`
+    - _Requirements: 10.2_
 
   - [x]* 6.3 Escribir tests de ejemplo deterministas del Código_Sembrado
-    - Por cada SE-1…SE-9: ejecutar el handler sembrado con la entrada documentada, verificar el tipo de excepción esperado, la detectabilidad por el marcador `ERROR:` y el aislamiento entre errores
-    - _Requirements: 10.3, 10.4, 10.5, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 11.9_
+    - Por cada SE-1…SE-9: ejecutar el handler con la entrada documentada y verificar el comportamiento defectuoso esperado y su detectabilidad (o no) por el marcador `ERROR:`
+    - **Retirado en la tarea 9:** `tests/test_seeded.py` se eliminó junto al paquete; la cobertura se consolidó en `tests/test_handlers.py`
+    - _Requirements: 10.3, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 11.9_
 
-- [ ] 7. Implementar la infraestructura CDK (IaC en Python)
-  - [ ] 7.1 Crear el esqueleto de la app CDK
+  - [x] 6.4 Fusionar los Seeded_Errors en los handlers desplegados (`services/crud_api/handlers/`)
+    - Distribuir el catálogo completo en las 5 Lambdas que se despliegan: Create → SE-1, SE-2, SE-8; Get → SE-3, SE-9; List → SE-4; Update → SE-5, SE-6; Delete → SE-7 (ampliado en la tarea 9 hasta SE-19)
+    - Marcar cada bug en el código con un comentario localizable (`# [SE-n] BUG INTENCIONAL: ...`) indicando el comportamiento correcto esperado
+    - Adaptar los tests para que afirmen el comportamiento defectuoso (es el contrato real desplegado)
+    - _Requirements: 10.1, 10.3, 10.6_
+
+  - [x] 6.5 Documentar los payloads de disparo en `services/crud_api/DEMO_ERRORS.md`
+    - Por cada SE-1…SE-19: endpoint real, comando `curl` completo, respuesta HTTP esperada, log resultante y si activa o no el Metric_Filter
+    - Identificar explícitamente el subconjunto silencioso y los enmascaramientos entre errores del mismo handler
+    - _Requirements: 10.5, 10.6, 10.7_
+
+- [x] 7. Implementar la infraestructura CDK (IaC en Python)
+  - [x] 7.1 Crear el esqueleto de la app CDK
     - `app.py`, `cdk.json`, paquete `infra/` y `requirements.txt` raíz para CDK; definir el stack base
     - _Requirements: 8.1_
 
-  - [ ] 7.2 Definir la tabla DynamoDB
+  - [x] 7.2 Definir la tabla DynamoDB
     - PK `task_id` (String), sin sort key, facturación on-demand (PAY_PER_REQUEST)
     - _Requirements: 9.1_
 
-  - [ ] 7.3 Definir las 5 funciones Lambda con IAM de mínimo privilegio y tag `github-repo`
+  - [x] 7.3 Definir las 5 funciones Lambda con IAM de mínimo privilegio y tag `github-repo`
     - Runtime `python3.13`, arquitectura `arm64`, empaquetado zip; variable de entorno `TABLE_NAME`; permisos por operación (Create/Update/Delete → escritura; Get → `GetItem`; List → `Scan`); tag `github-repo` con valor `owner/repo` en cada Lambda
     - _Requirements: 8.3_
 
-  - [ ] 7.4 Definir el API Gateway REST (OpenAPI) + Usage Plan + API Key
+  - [x] 7.4 Definir el API Gateway REST (OpenAPI) + Usage Plan + API Key
     - REST API definido con OpenAPI, `apiKeyRequired: true` en cada método; rutas POST/GET `/tasks`, GET/PUT/DELETE `/tasks/{task_id}` integradas (Lambda proxy) con sus handlers; Usage Plan con rate 100/s, burst 200, quota 10.000/día
     - _Requirements: 8.1, 8.2, 8.4, 8.5, 8.6_
 
-  - [ ] 7.5 Definir la observabilidad (Log Group, Metric Filter `ERROR:`, Alarm)
+  - [x] 7.5 Definir la observabilidad (Log Group, Metric Filter `ERROR:`, Alarm)
     - Un Log Group por Lambda con retención; Metric Filter con `filterPattern` literal `ERROR:` publicando métrica de conteo; CloudWatch Alarm (threshold ≥ 1) cuyo cambio de estado se publica en EventBridge
     - _Requirements: 7.2_
 
-  - [ ]* 7.6 Escribir tests de aserción/smoke de CDK
+  - [x]* 7.6 Escribir tests de aserción/smoke de CDK
     - `aws_cdk.assertions.Template`: 5 rutas/métodos con `apiKeyRequired`, Usage Plan (rate 100/s, burst 200, quota 10.000/día), tabla con PK `task_id` (String), tag `github-repo` en cada Lambda, y ausencia de `print()` en `services/crud_api` (verificación estática / `bandit`)
     - _Requirements: 8.1, 8.5, 9.1, 7.3_
 
@@ -187,15 +201,23 @@ Las pruebas basadas en propiedades (`hypothesis` + `moto`) implementan las 17 Co
     - Peticiones con API Key ausente/inválida (403), válida con enrutamiento correcto, ruta/método no definidos (rechazo sin invocar Lambda) y superación de límites (429); 1–3 ejemplos representativos
     - _Requirements: 8.2, 8.3, 8.4, 8.6, 3.3_
 
-- [ ] 8. Checkpoint final - Asegurar que pasan todos los tests
+- [x] 8. Checkpoint final - Asegurar que pasan todos los tests
   - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 9. Ampliar el catálogo de Código_Sembrado para que las 5 alarmas sean disparables
+  - Añadidos SE-10 a SE-19 en los 5 handlers, con al menos un error detectable por Metric Filter en cada Lambda. Errores de conversión de tipos hacia DynamoDB (`Decimal` vs `float`), clave de partición incorrecta en nombre y en tipo, parámetros de consulta sin validar (`ProjectionExpression` con palabra reservada, `Limit` sin castear, `ExclusiveStartKey` sin decodificar), acceso a atributos inexistentes del item y validación cruzada del campo equivocado
+  - SE-8 transformado (el error de validación deja de capturarse, el resto sí) y SE-9 reducido (`print()` solo en la rama 404), para que Create y Get puedan emitir un stack trace con el marco del propio handler
+  - Eliminado el paquete redundante `services/crud_api/seeded/` (9 variantes aisladas, `SEEDED_ERRORS.md`) y `tests/test_seeded.py`; la documentación del catálogo pasa a `design.md` §6 y la operativa de disparo a `DEMO_ERRORS.md`
+  - Declarados en `api/openapi.yaml` los query params `limit` y `next` (GET /tasks) y `fields` (GET /tasks/{task_id})
+  - Cobertura de comportamiento defectuoso consolidada en `tests/test_handlers.py`
+  - _Requirements: 10.1, 10.4, 10.6, 11.8, 11.9, 11.10, 11.11, 11.12, 11.13, 11.14, 11.15, 11.16, 11.17, 11.18, 11.19_
 
 ## Notes
 
 - Las sub-tareas marcadas con `*` son opcionales y pueden omitirse para un MVP más rápido.
 - Cada tarea referencia requisitos específicos para trazabilidad.
 - Los property tests validan las 17 Correctness Properties universales del diseño (`hypothesis` + `moto`, mínimo 100 ejemplos por test).
-- Los tests del Código_Sembrado (6.3) fijan el estado inicial de la demo: su fallo es intencional y no debe "corregirse" en el estado sembrado.
+- Los tests del Código_Sembrado (6.3, 6.4) fijan el comportamiento defectuoso desplegado: su afirmación del bug es intencional. Un test que falle porque el bug ya no se reproduce indica que alguien rompió la demo, no que el código haya mejorado. No "corregir" los handlers de `handlers/` salvo petición explícita del usuario.
 - Los checkpoints aseguran validación incremental antes de avanzar.
 - Toda I/O contra DynamoDB usa `moto` (`@mock_aws`) en tests; nunca una tabla real.
 

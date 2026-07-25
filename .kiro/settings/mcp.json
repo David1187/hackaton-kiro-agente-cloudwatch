@@ -1,0 +1,60 @@
+{
+  "mcpServers": {
+    "aws-docs": {
+      "command": "uvx",
+      "args": [
+        "awslabs.aws-documentation-mcp-server@latest"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "disabled": false,
+      "autoApprove": []
+    },
+    "awslabs.aws-iac-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "tool",
+        "run",
+        "--from",
+        "awslabs.aws-iac-mcp-server@latest",
+        "awslabs.aws-iac-mcp-server.exe"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    "bedrock-agentcore-mcp-server": {
+      "disabled": false,
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "tool", 
+        "run", 
+        "--from",
+        "awslabs.amazon-bedrock-agentcore-mcp-server@latest",
+        "awslabs.amazon-bedrock-agentcore-mcp-server.exe"
+      ],
+      "env": { "FASTMCP_LOG_LEVEL": "ERROR" }
+    },
+    "awslabs-dynamodb-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "tool",
+        "run",
+        "--from",
+        "awslabs.dynamodb-mcp-server@latest",
+        "awslabs.dynamodb-mcp-server.exe"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    }
+  }
+}

@@ -108,7 +108,19 @@ flowchart TB
 
 ## 3. Estándares para el Código de las Lambdas CRUD (DynamoDB)
 
-Todas las funciones Lambda destinadas al ciclo CRUD deben cumplir las siguientes reglas:
+> ### ⚠️ EXCEPCIÓN VIGENTE Y DELIBERADA: las Lambdas desplegadas contienen errores sembrados
+>
+> **Las 5 Lambdas CRUD actualmente desplegadas NO cumplen los estándares de esta sección, y eso es intencional.** Por decisión explícita del usuario para la demo del Hackathon, los handlers de `services/crud_api/handlers/` contienen de forma **permanente** el catálogo completo de errores sembrados (SE-1 … SE-19), para que el jurado pueda dispararlos y observar al Agente de Auto-reparación en acción.
+>
+> Reglas que se derivan de esta excepción:
+>
+> - **PROHIBIDO "arreglar" los handlers de `services/crud_api/handlers/` por iniciativa propia.** El código defectuoso es el entregable, no una deuda técnica. Ningún agente debe aplicar programación defensiva a esos ficheros salvo petición explícita del usuario.
+> - Los estándares de esta sección 3 (y de `backend-standards.md` sección 1) describen el **Comportamiento_Objetivo**: el estado correcto al que el Agente de Auto-reparación debe llevar el código mediante sus Pull Requests. Son la referencia del *fix*, no del estado desplegado.
+> - Los payloads que disparan cada error están documentados en `services/crud_api/DEMO_ERRORS.md`, que es la **fuente de verdad** del catálogo real implementado.
+> - Los tests de `services/crud_api/tests/` afirman deliberadamente el comportamiento **defectuoso**. Un test que falla porque el bug ya no se reproduce indica que alguien rompió la demo, no que el código haya mejorado.
+> - Consecuencia asumida: mientras esté desplegado este código, la API **no funciona correctamente** para uso normal.
+
+Todas las funciones Lambda destinadas al ciclo CRUD deben cumplir las siguientes reglas (entendidas como Comportamiento_Objetivo, ver excepción anterior):
 
 - **Estructura Defensiva:** Implementar bloques estrictos de `try-except` (Python) en cada handler y en cada operación de I/O contra DynamoDB.
 - **Logging:** Utilizar el módulo estándar `logging` de Python (no `print()`). Cualquier fallo controlado o no controlado debe registrarse con `logging.error(..., exc_info=True)`, de forma que el mensaje resultante en stdout/CloudWatch Logs contenga el prefijo `ERROR:` seguido del stack trace detallado. Este formato es el que consume el CloudWatch Metric Filter para detectar anomalías; no debe alterarse sin actualizar también el Metric Filter correspondiente.
