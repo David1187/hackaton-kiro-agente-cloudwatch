@@ -1,28 +1,31 @@
 """
-handlers/list_tasks.py — List Tasks Lambda handler.
+handlers/list_tasks.py — List Tasks Lambda handler (INTENCIONALMENTE DEFECTUOSO).
 
-GET /tasks
+⚠️  CÓDIGO DELIBERADAMENTE DEFECTUOSO PARA DEMO DEL AGENTE DE AUTO-REPARACIÓN ⚠️
 
-Scans DynamoDB (up to 1000 items) and responds 200 with:
-  {"tasks": [...], "count": <int>}
+Este handler contiene los siguientes errores sembrados de forma PERMANENTE:
+  • SE-4: Ejecuta table.scan() SIN el parámetro Limit cuando no hay query params,
+          devolviendo TODOS los items de la tabla sin restricción.
+  • SE-14: Si viene el query param 'limit', se pasa a scan(Limit=<valor>) sin
+           castear a int → ParamValidationError para CUALQUIER valor de limit.
+  • SE-15: Si viene el query param 'next', se pasa a scan(ExclusiveStartKey=<string>)
+           sin decodificar a dict → ParamValidationError.
 
-An empty table returns {"tasks": [], "count": 0} — never 404.
-All Decimal values from DynamoDB are handled by DecimalEncoder.
+Consultar: services/crud_api/DEMO_ERRORS.md para los payloads exactos que
+disparan cada error de forma independiente.
 
-Error hierarchy:
-  1. ClientError      → 500
-  2. ParamValidationError → 500
-  3. Exception (net)  → 500
-
-Requirements: 3.1, 3.2, 3.4
+EXCEPCIÓN DELIBERADA a architecture-guide.md §3 y backend-standards.md §1:
+este código defectuoso ES el entregable para la demo del hackathon.
 """
 
 from __future__ import annotations
 
+import os
+
+import boto3
 import botocore.exceptions
 
 from common import (
-    TaskRepository,
     configure_logger,
     error_response,
     success_response,
@@ -30,9 +33,28 @@ from common import (
 
 logger = configure_logger(__name__)
 
+# [SE-4] BUG INTENCIONAL: se crea un acceso directo a DynamoDB sin usar
+# TaskRepository.list(limit=1000) para poder omitir el parámetro Limit.
+# Comportamiento correcto: usar TaskRepository.list(limit=1000) que aplica
+# Limit en el scan.
+_dynamodb = None
+_table = None
+
+
+def _get_table():
+    """Lazy-init de la tabla DynamoDB (sin pasar por TaskRepository)."""
+    global _dynamodb, _table
+    if _table is None:
+        _dynamodb = boto3.resource("dynamodb")
+        _table = _dynamodb.Table(os.environ["TABLE_NAME"])
+    return _table
+
 
 def handler(event: dict, context: object) -> dict:
     """Lambda entry point for GET /tasks.
+
+    ⚠️  HANDLER INTENCIONALMENTE DEFECTUOSO — contiene SE-4, SE-14, SE-15.
+    Ver DEMO_ERRORS.md para payloads de disparo.
 
     Args:
         event:   Lambda proxy integration event (no parameters required).
@@ -42,14 +64,39 @@ def handler(event: dict, context: object) -> dict:
         Lambda proxy response dict.
     """
     try:
-        # --- 1. Retrieve all tasks (scan, limit 1000) ---------------------- #
-        tasks = TaskRepository.list(limit=1000)
+        table = _get_table()
+        query_params = event.get("queryStringParameters") or {}
 
-        # --- 2. Respond 200 with tasks + count ---------------------------- #
+        scan_kwargs = {}
+
+        # [SE-14] BUG INTENCIONAL: si viene 'limit', se pasa TAL CUAL (string)
+        # sin castear a int. DynamoDB espera un entero para Limit →
+        # ParamValidationError para CUALQUIER valor.
+        # Comportamiento correcto: scan_kwargs["Limit"] = int(query_params["limit"])
+        if "limit" in query_params:
+            scan_kwargs["Limit"] = query_params["limit"]
+
+        # [SE-15] BUG INTENCIONAL: si viene 'next', se pasa como string directamente
+        # a ExclusiveStartKey. DynamoDB espera un dict con la clave primaria →
+        # ParamValidationError.
+        # Comportamiento correcto: decodificar el token (ej. base64 → json → dict)
+        #   import json, base64
+        #   scan_kwargs["ExclusiveStartKey"] = json.loads(base64.b64decode(query_params["next"]))
+        if "next" in query_params:
+            scan_kwargs["ExclusiveStartKey"] = query_params["next"]
+
+        # [SE-4] BUG INTENCIONAL: scan SIN Limit (cuando no se pasa 'limit').
+        # Devuelve todos los items de la tabla sin restricción de cantidad.
+        # Con tabla grande: posible timeout, OOM, o ClientError(ReadThrottled).
+        # Comportamiento correcto: table.scan(Limit=1000) o usar
+        # TaskRepository.list(limit=1000).
+        response = table.scan(**scan_kwargs)
+        tasks = response.get("Items", [])
+
         return success_response(200, {"tasks": tasks, "count": len(tasks)})
 
     except botocore.exceptions.ClientError:
-        logger.error("ERROR: ClientError en list_tasks", exc_info=True)
+        logger.error("ERROR: ClientError en list_tasks (scan sin limite)", exc_info=True)
         return error_response(500, "DDB_ERROR", "Error al acceder a la base de datos.")
 
     except botocore.exceptions.ParamValidationError:

@@ -1,27 +1,31 @@
 """
-handlers/create_task.py — Create Task Lambda handler.
+handlers/create_task.py — Create Task Lambda handler (INTENCIONALMENTE DEFECTUOSO).
 
-POST /tasks
+⚠️  CÓDIGO DELIBERADAMENTE DEFECTUOSO PARA DEMO DEL AGENTE DE AUTO-REPARACIÓN ⚠️
 
-Parses and validates the request body, generates a new task_id (UUID v4),
-sets created_at / updated_at to the same ISO 8601 UTC instant with
-milliseconds, defaults completed to false, persists via TaskRepository, and
-responds 201 with the full Task item.
+Este handler contiene los siguientes errores sembrados de forma PERMANENTE:
+  • SE-1: No valida que el campo 'title' sea no vacío / no solo espacios.
+  • SE-2: Usa un timestamp hardcoded ("1970-01-01T00:00:00.000+00:00") en vez
+          de datetime.now(timezone.utc).
+  • SE-8 (TRANSFORMADO): Manejo de errores incompleto — captura ClientError,
+          ParamValidationError y Exception con logger.error(), pero NO captura
+          ValidationError, que sigue propagándose al runtime (502 en API Gateway).
+  • SE-10: Si el body trae 'priority', se copia al item sin convertir a Decimal.
+           Con valor float, boto3 lanza TypeError ('Float types are not supported').
+  • SE-11: Si el body trae 'task_id', se usa tal cual sin validar tipo ni generar
+           uuid4. Con valor numérico, DynamoDB lanza ClientError por type mismatch.
 
-Error hierarchy (try-except order):
-  1. ValidationError  → 400
-  2. NotFoundError    → 404 (should not occur on create, kept for safety)
-  3. ClientError      → 500
-  4. ParamValidationError → 500
-  5. Exception (net)  → 500
+Consultar: services/crud_api/DEMO_ERRORS.md para los payloads exactos que
+disparan cada error de forma independiente.
 
-Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+EXCEPCIÓN DELIBERADA a architecture-guide.md §3 y backend-standards.md §1:
+este código defectuoso ES el entregable para la demo del hackathon.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timezone
 
 import botocore.exceptions
 
@@ -36,62 +40,91 @@ from common import (
 
 logger = configure_logger(__name__)
 
+# [SE-2] BUG INTENCIONAL: timestamp hardcoded — nunca refleja la hora real.
+# Comportamiento correcto: usar datetime.now(timezone.utc) para generar un
+# timestamp ISO 8601 dinámico con milisegundos.
+_HARDCODED_TIMESTAMP = "1970-01-01T00:00:00.000+00:00"
+
 
 def handler(event: dict, context: object) -> dict:
     """Lambda entry point for POST /tasks.
+
+    ⚠️  HANDLER INTENCIONALMENTE DEFECTUOSO — contiene SE-1, SE-2, SE-8, SE-10, SE-11.
+    Ver DEMO_ERRORS.md para payloads de disparo.
 
     Args:
         event:   Lambda proxy integration event.
         context: Lambda context object (unused).
 
     Returns:
-        Lambda proxy response dict.
+        Lambda proxy response dict (o excepción no capturada para ValidationError).
     """
+    # [SE-8] BUG INTENCIONAL (TRANSFORMADO): manejo de errores incompleto.
+    # Se capturan ClientError, ParamValidationError y Exception genérica,
+    # PERO NO se captura ValidationError → sigue propagándose al runtime
+    # de Lambda → 502 en API Gateway.
+    # Comportamiento correcto: capturar también ValidationError y devolver
+    # error_response(400, exc.code, exc.message).
     try:
-        # --- 1. Parse and validate body ------------------------------------ #
         body = Payload_Validator.parse_json_body(event)
 
-        # title is required for creation
         if "title" not in body:
             raise ValidationError(
                 "MISSING_FIELD",
                 "El campo 'title' es obligatorio para crear una tarea.",
             )
-        title = Payload_Validator.validate_title(body["title"])
 
-        # completed is optional on creation; default is False
+        # [SE-1] BUG INTENCIONAL: se usa el valor crudo sin validar.
+        # No se llama a Payload_Validator.validate_title(), por lo que se aceptan
+        # títulos vacíos ("") o de solo espacios ("   ") y se almacenan en DynamoDB.
+        # Comportamiento correcto: title = Payload_Validator.validate_title(body["title"])
+        title = body["title"]
+
+        completed = False
         if "completed" in body:
             completed = Payload_Validator.validate_completed(body["completed"])
+
+        # [SE-11] BUG INTENCIONAL: si el body trae 'task_id', se usa directamente
+        # sin generar uuid4 y sin validar tipo.
+        # Con {"title":"x","task_id":123} DynamoDB lanza ClientError porque la PK
+        # espera tipo S (string) pero recibe N (number).
+        # Comportamiento correcto: SIEMPRE generar task_id = str(uuid.uuid4()),
+        # ignorar cualquier task_id proporcionado por el cliente.
+        if "task_id" in body:
+            task_id = body["task_id"]
         else:
-            completed = False
+            task_id = str(uuid.uuid4())
 
-        # --- 2. Build Task item -------------------------------------------- #
-        now = datetime.now(timezone.utc)
-        # ISO 8601 with milliseconds and UTC offset, e.g. "2026-07-24T23:00:00.123+00:00"
-        timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}" + "+00:00"
-
+        # [SE-2] BUG INTENCIONAL: usa la constante _HARDCODED_TIMESTAMP en vez de
+        # generar dinámicamente con datetime.now(timezone.utc).
+        # Todos los items tendrán created_at = updated_at = "1970-01-01T00:00:00.000+00:00".
         task = {
-            "task_id": str(uuid.uuid4()),
+            "task_id": task_id,
             "title": title,
             "completed": completed,
-            "created_at": timestamp,
-            "updated_at": timestamp,
+            "created_at": _HARDCODED_TIMESTAMP,
+            "updated_at": _HARDCODED_TIMESTAMP,
         }
 
-        # --- 3. Persist ---------------------------------------------------- #
+        # [SE-10] BUG INTENCIONAL: si el body trae 'priority', se copia al item
+        # TAL CUAL sin convertir a Decimal.
+        # Con {"title":"x","priority":3.5} boto3 lanza TypeError porque DynamoDB
+        # no soporta float nativo de Python — requiere Decimal.
+        # Comportamiento correcto: from decimal import Decimal
+        #   if "priority" in body:
+        #       task["priority"] = Decimal(str(body["priority"]))
+        if "priority" in body:
+            task["priority"] = body["priority"]
+
         TaskRepository.create(task)
 
-        # --- 4. Respond 201 ------------------------------------------------ #
         return success_response(201, task)
 
-    except ValidationError as exc:
-        logger.error("ERROR: validacion fallida en create_task: %s", exc.message)
-        return error_response(400, exc.code, exc.message)
-
-    except TaskRepository.NotFoundError:
-        # Should not occur during create, but included as safety net
-        logger.error("ERROR: NotFoundError inesperado en create_task", exc_info=True)
-        return error_response(500, "INTERNAL_ERROR", "Error interno inesperado.")
+    except ValidationError:
+        # [SE-8] BUG INTENCIONAL: ValidationError NO se captura para devolver 400.
+        # Se re-lanza al runtime de Lambda → 502 en API Gateway.
+        # Comportamiento correcto: return error_response(400, exc.code, exc.message)
+        raise
 
     except botocore.exceptions.ClientError:
         logger.error("ERROR: ClientError en create_task", exc_info=True)

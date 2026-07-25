@@ -29,6 +29,19 @@ paths:
       operationId: listTasks
       security:
         - api_key: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Maximum number of tasks to return
+        - name: next
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Pagination token for the next page of results
       x-amazon-apigateway-integration:
         type: aws_proxy
         httpMethod: POST
@@ -52,6 +65,13 @@ paths:
       operationId: getTask
       security:
         - api_key: []
+      parameters:
+        - name: fields
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated list of fields to return (ProjectionExpression)
       x-amazon-apigateway-integration:
         type: aws_proxy
         httpMethod: POST
