@@ -11,10 +11,14 @@ venv/
 deploy*.ps1
 deploy_output*.txt
 deploy_result.txt
+deploy_*.txt
 cdk_out.txt
 cdk_stdout.txt
 cdk_stderr.txt
 verify.bat
+diff_*.txt
+runtime_logs*.json
+test_invoke_*.json
 
 # Notas de trabajo locales: se mantienen en disco, no se publican en el repo
 PROGRESS.md
