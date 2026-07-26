@@ -17,10 +17,10 @@ from datetime import datetime, timezone
 
 import boto3
 import botocore.exceptions
+from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
-from strands.tools.mcp.mcp_client import StreamableHTTPTransport
 
 # Dual-mode imports: support both package import (from .module) and direct
 # script execution (from module). This allows entryPoint=['python', 'agent.py']
@@ -67,6 +67,10 @@ def _get_lambda_client():
 
 # AgentCore Gateway URL for GitHub MCP (injected via environment)
 GATEWAY_MCP_URL = os.environ.get("GATEWAY_MCP_URL", "")
+
+# AWS region where the AgentCore Gateway is deployed (AgentCore Runtime sets
+# AWS_REGION automatically; falls back to AWS_DEFAULT_REGION for local/test runs)
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
 
 # System prompt for the agent's LLM
 SYSTEM_PROMPT = """You are a Self-Healing Agent that fixes Python Lambda function errors.
@@ -214,9 +218,17 @@ def handle_event(event: dict) -> dict:
         model_id = resolve_model_id(os.environ)
         bedrock_model = BedrockModel(model_id=model_id, temperature=0.3)
 
-        # Connect to GitHub MCP via AgentCore Gateway
-        transport = StreamableHTTPTransport(GATEWAY_MCP_URL)
-        mcp_client = MCPClient(transport)
+        # Connect to GitHub MCP via AgentCore Gateway. The Gateway enforces
+        # authorizerType=AWS_IAM (see infra/constructs/agent_gateway.py), so
+        # requests must be SigV4-signed with the runtime's execution role
+        # credentials — aws_iam_streamablehttp_client handles that signing.
+        mcp_client = MCPClient(
+            lambda: aws_iam_streamablehttp_client(
+                endpoint=GATEWAY_MCP_URL,
+                aws_region=AWS_REGION,
+                aws_service="bedrock-agentcore",
+            )
+        )
 
         # Create the agent with MCP tools
         agent = Agent(
@@ -272,11 +284,34 @@ try:
     app = BedrockAgentCoreApp()
 
     @app.entrypoint
-    def invoke(event: dict) -> dict:
-        """AgentCore Runtime entrypoint — handles /invocations POST."""
+    def invoke(payload: dict) -> dict:
+        """AgentCore Runtime entrypoint — handles /invocations POST.
+
+        AgentCore Runtime passes the full HTTP request body as `payload`
+        with NO automatic unwrapping. The bridge Lambda sends
+        {"input": {"prompt": json.dumps(eventbridge_event)}} as that body,
+        so `payload` arrives here as {"input": {"prompt": "<json string>"}}.
+        The actual EventBridge event is JSON-encoded inside
+        payload["input"]["prompt"] and must be parsed out before being
+        handed to handle_event().
+        """
         logger.info("AgentCore Runtime invocation received")
-        if isinstance(event, str):
-            event = json.loads(event)
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+
+        prompt = None
+        if isinstance(payload, dict):
+            input_field = payload.get("input")
+            if isinstance(input_field, dict):
+                prompt = input_field.get("prompt")
+            elif "prompt" in payload:
+                prompt = payload.get("prompt")
+
+        if prompt is not None:
+            event = json.loads(prompt) if isinstance(prompt, str) else prompt
+        else:
+            event = payload
+
         return handle_event(event)
 
 except ImportError:

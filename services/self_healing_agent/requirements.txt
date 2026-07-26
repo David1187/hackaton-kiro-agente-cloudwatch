@@ -1,3 +1,4 @@
-strands-agents==1.1.2
-bedrock-agentcore==1.1.2
-boto3==1.39.3
+strands-agents==1.10.0
+bedrock-agentcore==1.18.1
+boto3==1.43.56
+mcp-proxy-for-aws==1.6.4

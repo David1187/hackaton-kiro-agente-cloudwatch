@@ -29,6 +29,8 @@ _mock_strands = MagicMock()
 _mock_strands_models = MagicMock()
 _mock_strands_tools_mcp = MagicMock()
 _mock_strands_tools_mcp_client = MagicMock()
+_mock_mcp_proxy_for_aws = MagicMock()
+_mock_mcp_proxy_for_aws_client = MagicMock()
 _mock_bedrock_agentcore = MagicMock()
 _mock_bedrock_agentcore_runtime = MagicMock()
 
@@ -37,6 +39,8 @@ sys.modules.setdefault("strands.models", _mock_strands_models)
 sys.modules.setdefault("strands.tools", MagicMock())
 sys.modules.setdefault("strands.tools.mcp", _mock_strands_tools_mcp)
 sys.modules.setdefault("strands.tools.mcp.mcp_client", _mock_strands_tools_mcp_client)
+sys.modules.setdefault("mcp_proxy_for_aws", _mock_mcp_proxy_for_aws)
+sys.modules.setdefault("mcp_proxy_for_aws.client", _mock_mcp_proxy_for_aws_client)
 sys.modules.setdefault("bedrock_agentcore", _mock_bedrock_agentcore)
 sys.modules.setdefault("bedrock_agentcore.runtime", _mock_bedrock_agentcore_runtime)
 
@@ -183,7 +187,7 @@ class TestHandleEventGatewayCredentialFailure:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_agent_auth_error_returns_failed(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
@@ -208,7 +212,7 @@ class TestHandleEventBranchPrFailure:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_agent_execution_failure_returns_failed(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
@@ -233,7 +237,7 @@ class TestHandleEventNoMergeApprove:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_successful_flow_does_not_merge(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
@@ -269,7 +273,7 @@ class TestHandleEventNoRepoEnumeration:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_agent_prompt_specifies_exact_repo(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
@@ -297,7 +301,7 @@ class TestHandleEventNoRepoEnumeration:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_repo_from_tag_used_in_prompt(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
@@ -321,7 +325,7 @@ class TestHandleEventSuccessFlow:
     @patch(f"{_PATCH_PREFIX}.GATEWAY_MCP_URL", "https://gateway.example.com/mcp")
     @patch(f"{_PATCH_PREFIX}.Agent")
     @patch(f"{_PATCH_PREFIX}.MCPClient")
-    @patch(f"{_PATCH_PREFIX}.StreamableHTTPTransport")
+    @patch(f"{_PATCH_PREFIX}.aws_iam_streamablehttp_client")
     @patch(f"{_PATCH_PREFIX}.BedrockModel")
     def test_success_returns_expected_details(
         self, mock_bedrock, mock_transport, mock_mcp, mock_agent_cls, mock_tags, mock_logs
