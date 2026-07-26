@@ -11,7 +11,7 @@ El flujo de detección y remediación es el siguiente:
 3. El cambio de estado de la alarma se publica en **Amazon EventBridge**, que invoca al agente.
 4. El agente, alojado en **Amazon Bedrock AgentCore Runtime** y desarrollado con **Strands-Agents (Python)**, consulta CloudWatch Logs para obtener el stack trace real (el evento de EventBridge solo trae metadata).
 5. El agente lee el tag `github-repo` de la Lambda afectada para resolver el repositorio objetivo (`owner/repo`).
-6. El agente, usando el modelo **Qwen3 Coder 30B A3B** (`qwen.qwen3-coder-30b-a3b-instruct`, configurable vía variable de entorno), genera el parche.
+6. El agente, usando el modelo **Qwen3 Coder 30B A3B** (`qwen.qwen3-coder-30b-a3b-v1:0`, configurable vía variable de entorno), genera el parche.
 7. A través de **AgentCore Gateway** conectado al **MCP remoto oficial de GitHub** (con un PAT almacenado en **AWS Secrets Manager** e inyectado de forma efímera por el Gateway), el agente crea una rama `fix/auto-heal-{lambda}-{timestamp}` desde `main`, escribe el parche y abre un Pull Request.
 8. El Pull Request queda pendiente de revisión y aprobación humana obligatoria.
 
@@ -38,7 +38,7 @@ La spec `todo-crud-api` define en su diseño la infraestructura de observabilida
 - **AgentCore_Runtime**: Amazon Bedrock AgentCore Runtime, entorno serverless administrado donde se ejecuta el Self_Healing_Agent.
 - **AgentCore_Gateway**: Componente de AWS que actúa como intermediario autenticado entre el Self_Healing_Agent y el GitHub_MCP, responsable de inyectar el GitHub_PAT de forma efímera en tránsito.
 - **GitHub_MCP**: Servidor Model Context Protocol remoto oficial de GitHub que expone herramientas para leer archivos, crear ramas y abrir Pull Requests.
-- **LLM_Model**: Modelo de lenguaje utilizado por el Self_Healing_Agent para analizar errores y generar parches. Por defecto Qwen3 Coder 30B A3B (identificador Bedrock `qwen.qwen3-coder-30b-a3b-instruct`), gestionado/serverless en Amazon Bedrock.
+- **LLM_Model**: Modelo de lenguaje utilizado por el Self_Healing_Agent para analizar errores y generar parches. Por defecto Qwen3 Coder 30B A3B (identificador Bedrock `qwen.qwen3-coder-30b-a3b-v1:0`), gestionado/serverless en Amazon Bedrock.
 - **Model_Id_Variable**: Variable de entorno del AgentCore_Runtime que contiene el identificador del LLM_Model, permitiendo cambiarlo sin redeploy de código.
 - **Metric_Filter**: CloudWatch Metric Filter configurado con el patrón `ERROR:` sobre el Log_Group de una Lambda CRUD, que incrementa una métrica de conteo de errores.
 - **CloudWatch_Alarm**: Alarma de CloudWatch sobre la métrica del Metric_Filter que cambia a estado `ALARM` cuando se detecta al menos un error en el periodo de evaluación.
@@ -96,7 +96,7 @@ La spec `todo-crud-api` define en su diseño la infraestructura de observabilida
 #### Acceptance Criteria
 
 1. THE Self_Healing_Agent SHALL obtener el identificador del LLM_Model desde la Model_Id_Variable de entorno del AgentCore_Runtime.
-2. WHERE la Model_Id_Variable no está definida, THE Self_Healing_Agent SHALL usar el valor por defecto `qwen.qwen3-coder-30b-a3b-instruct`.
+2. WHERE la Model_Id_Variable no está definida, THE Self_Healing_Agent SHALL usar el valor por defecto `qwen.qwen3-coder-30b-a3b-v1:0`.
 3. THE Self_Healing_Agent SHALL NOT contener el identificador del LLM_Model codificado de forma fija en el código fuente fuera de la lectura de la Model_Id_Variable y su valor por defecto.
 4. WHEN el Self_Healing_Agent analiza un error y genera un parche, THE Self_Healing_Agent SHALL invocar el LLM_Model identificado por la Model_Id_Variable a través de Amazon Bedrock.
 

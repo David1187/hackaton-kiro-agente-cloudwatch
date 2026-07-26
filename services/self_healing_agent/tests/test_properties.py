@@ -86,7 +86,7 @@ class TestProperty1ModelResolution:
 
     def test_default_model_matches_expected_value(self):
         """The default model ID is the one specified in architecture-guide.md."""
-        assert DEFAULT_MODEL_ID == "qwen.qwen3-coder-30b-a3b-instruct"
+        assert DEFAULT_MODEL_ID == "qwen.qwen3-coder-30b-a3b-v1:0"
 
 
 # ====================================================================

@@ -1,4 +1,4 @@
-﻿# Implementation Plan: Self-Healing Agent
+# Implementation Plan: Self-Healing Agent
 
 ## Overview
 
@@ -18,7 +18,7 @@ Cada tarea construye sobre las anteriores y termina cableada al conjunto; no que
 
 - [x] 2. Implementar la lógica pura del runtime del agente
   - [x] 2.1 Implementar la resolución del identificador de modelo en `config.py`
-    - Implementar `resolve_model_id(env: Mapping[str, str]) -> str` que devuelva `env["Model_Id_Variable"]` si está presente y no vacío, y en cualquier otro caso el default `qwen.qwen3-coder-30b-a3b-instruct`
+    - Implementar `resolve_model_id(env: Mapping[str, str]) -> str` que devuelva `env["Model_Id_Variable"]` si está presente y no vacío, y en cualquier otro caso el default `qwen.qwen3-coder-30b-a3b-v1:0`
     - No incluir ningún otro literal de modelo en el código
     - _Requirements: 4.1, 4.2, 4.3_
 
@@ -133,7 +133,7 @@ Cada tarea construye sobre las anteriores y termina cableada al conjunto; no que
 - Cada tarea referencia requisitos específicos para trazabilidad.
 - Los property tests (P1–P5) usan `hypothesis` con `max_examples>=100` y se limitan a la lógica pura del agente; la infraestructura CDK y la integración con servicios externos se validan con assertions/snapshots y tests basados en mocks/ejemplos.
 - El agente nunca hace merge/approve y nunca accede al GitHub_PAT en texto plano; el Gateway es la única frontera con el secreto.
-- El `model_id` se externaliza vía `Model_Id_Variable` (default `qwen.qwen3-coder-30b-a3b-instruct`) sin literales adicionales en el código.
+- El `model_id` se externaliza vía `Model_Id_Variable` (default `qwen.qwen3-coder-30b-a3b-v1:0`) sin literales adicionales en el código.
 
 ## Task Dependency Graph
 

@@ -35,7 +35,7 @@ EventBridge Rule --invoke--> AgentCore Runtime (Strands + Qwen3 Coder)
 
 ### Hallazgos de investigación que informan el diseño
 
-- **Disponibilidad del LLM_Model.** `qwen.qwen3-coder-30b-a3b-instruct` (Qwen3 Coder 30B A3B) está disponible en Amazon Bedrock como oferta **totalmente gestionada y serverless** desde el 18/09/2025, e incluye la región **Europa (Irlanda) `eu-west-1`**, que es la región de despliegue del proyecto ([anuncio AWS](https://aws.amazon.com/about-aws/whats-new/2025/09/qwen3-models-fully-managed-amazon-bedrock), [model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-30b-a3b-instruct.html)). Es un modelo Mixture-of-Experts (30B totales / 3B activos) orientado a *agentic coding* y tareas de generación de código, por lo que es adecuado para análisis de errores y generación de parches. *Contenido reformulado para cumplir restricciones de licencia.*
+- **Disponibilidad del LLM_Model.** `qwen.qwen3-coder-30b-a3b-v1:0` (Qwen3 Coder 30B A3B) está disponible en Amazon Bedrock como oferta **totalmente gestionada y serverless** desde el 18/09/2025, e incluye la región **Europa (Irlanda) `eu-west-1`**, que es la región de despliegue del proyecto ([anuncio AWS](https://aws.amazon.com/about-aws/whats-new/2025/09/qwen3-models-fully-managed-amazon-bedrock), [model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-30b-a3b-instruct.html)). Es un modelo Mixture-of-Experts (30B totales / 3B activos) orientado a *agentic coding* y tareas de generación de código, por lo que es adecuado para análisis de errores y generación de parches. *Contenido reformulado para cumplir restricciones de licencia.*
 - **Idoneidad y riesgo.** El modelo es apto para el caso de uso, pero al ser un modelo de código relativamente compacto puede ofrecer menor calidad de razonamiento en stack traces muy complejos frente a modelos de mayor tamaño (p. ej. Qwen3-Coder-480B o Claude Sonnet, que el steering menciona como alternativa). Dado que el requisito exige `model_id` configurable por `Model_Id_Variable`, esta limitación se mitiga por diseño: se puede cambiar el modelo sin redeploy de código. Se documenta como consideración de diseño en la sección de riesgos.
 - **Empaquetado del AgentCore_Runtime.** El AgentCore Runtime tradicionalmente requería empaquetar el agente como imagen de contenedor **ARM64 en ECR** ([requisitos custom](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/getting-started-custom.html)), lo que colisionaría con la prohibición de ECR del steering. Desde nov-2025 AgentCore Runtime soporta **direct code deployment**: se empaqueta el código Python + dependencias en un `.zip`, se sube a S3 y se configura el runtime, **sin construir ni gestionar imágenes de contenedor** ([direct code deployment Python](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-code-deploy-python.html)). Este diseño adopta **direct code deployment** para cumplir la restricción "sin ECR" y mantener el modelo 100% serverless (responsabilidad compartida análoga a AWS Lambda). *Contenido reformulado para cumplir restricciones de licencia.*
 
@@ -65,7 +65,7 @@ flowchart TB
     end
 
     subgraph Bedrock["Amazon Bedrock"]
-        LLM["LLM_Model\nqwen.qwen3-coder-30b-a3b-instruct\n(Model_Id_Variable)"]
+        LLM["LLM_Model\nqwen.qwen3-coder-30b-a3b-v1:0\n(Model_Id_Variable)"]
     end
 
     subgraph Sec["Secretos"]
@@ -139,7 +139,7 @@ sequenceDiagram
 - **Una EventBridge_Rule por Alarm (o una regla con patrón que cubra las 5 alarmas).** La regla filtra el evento `CloudWatch Alarm State Change` cuyo `detail.state.value == "ALARM"` y cuyo `detail.alarmName` corresponde a las alarmas de las Lambdas CRUD. El target es el AgentCore_Runtime.
 - **AgentCore_Runtime con direct code deployment.** Se empaqueta el agente Strands (Python) en `.zip` sin contenedor ni ECR, cumpliendo la prohibición del steering y manteniendo el modelo serverless. La invocación desde EventBridge se realiza vía el API de invocación del runtime (el target de EventBridge apunta al runtime a través de su ARN, con rol IAM que permite `InvokeAgentRuntime`).
 - **AgentCore_Gateway como frontera de seguridad del PAT.** El agente **nunca** ve el GitHub_PAT: invoca herramientas MCP a través del Gateway, que recupera el secreto de Secrets_Manager y lo inyecta en tránsito (Req 7). Solo el rol del Gateway tiene `secretsmanager:GetSecretValue` sobre el secreto; el rol del agente **no** (Req 11.3, 11.5).
-- **`model_id` externalizado.** El agente lee `Model_Id_Variable` del entorno del runtime; si no está definida, usa el default `qwen.qwen3-coder-30b-a3b-instruct` (Req 4). Ningún otro literal de modelo aparece en el código.
+- **`model_id` externalizado.** El agente lee `Model_Id_Variable` del entorno del runtime; si no está definida, usa el default `qwen.qwen3-coder-30b-a3b-v1:0` (Req 4). Ningún otro literal de modelo aparece en el código.
 - **Resolución de repositorio solo por tag.** El agente lee el tag `github-repo` de la Affected_Lambda vía `lambda:ListTags` / `resourcegroupstaggingapi` y nunca enumera repositorios (Req 6).
 - **Prohibición de merge automático.** El agente solo dispone de herramientas MCP de lectura de archivos, creación de rama, escritura de archivo y creación de PR. No se habilita ninguna herramienta de merge/approve, ni flag que la active (Req 10).
 
@@ -238,7 +238,7 @@ infra/
 
 - **`repo_tag.parse_repo_tag(tags: dict) -> RepoRef`** — extrae el valor de `github-repo` y valida el formato `owner/repo`. Lanza `InvalidRepoTagError` si falta o el formato es inválido (Req 6.2, 6.5).
 - **`branch_naming.build_fix_branch_name(lambda_name: str, timestamp: datetime) -> str`** — construye `fix/auto-heal-{lambda}-{timestamp}` de forma determinista, saneando caracteres no válidos para nombres de rama de Git (Req 9.1).
-- **`config.resolve_model_id(env: Mapping[str, str]) -> str`** — devuelve `env["Model_Id_Variable"]` o el default `qwen.qwen3-coder-30b-a3b-instruct` (Req 4.1, 4.2).
+- **`config.resolve_model_id(env: Mapping[str, str]) -> str`** — devuelve `env["Model_Id_Variable"]` o el default `qwen.qwen3-coder-30b-a3b-v1:0` (Req 4.1, 4.2).
 
 Estos tres son funciones puras y constituyen la superficie principal de property-based testing (ver Testing Strategy).
 
@@ -299,7 +299,7 @@ El agente deriva de esta metadata el nombre de la Affected_Lambda y su Log_Group
 
 | Variable | Formato | Uso |
 |----------|---------|-----|
-| `Model_Id_Variable` | id de modelo Bedrock | LLM_Model a invocar; default `qwen.qwen3-coder-30b-a3b-instruct` (Req 4). |
+| `Model_Id_Variable` | id de modelo Bedrock | LLM_Model a invocar; default `qwen.qwen3-coder-30b-a3b-v1:0` (Req 4). |
 
 > **No** se define ninguna variable de entorno con el GitHub_PAT (Req 7.4). El token vive solo en Secrets_Manager y lo maneja el Gateway.
 
@@ -311,7 +311,7 @@ La mayor parte de esta feature es infraestructura (CDK) y orquestación con depe
 
 ### Property 1: Resolución del identificador del modelo
 
-*For any* mapa de variables de entorno, `resolve_model_id` devuelve el valor de `Model_Id_Variable` cuando está presente y no vacío, y en cualquier otro caso devuelve exactamente el default `qwen.qwen3-coder-30b-a3b-instruct`.
+*For any* mapa de variables de entorno, `resolve_model_id` devuelve el valor de `Model_Id_Variable` cuando está presente y no vacío, y en cualquier otro caso devuelve exactamente el default `qwen.qwen3-coder-30b-a3b-v1:0`.
 
 **Validates: Requirements 4.1, 4.2**
 
@@ -397,7 +397,7 @@ Siguiendo iac-standards §4, `test_agent_stack.py` verifica al menos:
 
 ## Consideraciones y Riesgos de Diseño
 
-- **Idoneidad del LLM_Model (Qwen3 Coder 30B A3B).** Confirmado disponible y serverless en Bedrock `eu-west-1` y orientado a *agentic coding*, por lo que es adecuado para el caso de uso. Riesgo: al ser un modelo compacto (3B activos), la calidad del parche en stack traces complejos puede ser inferior a modelos mayores (Qwen3-Coder-480B) o a Claude Sonnet (alternativa citada en el steering). **Mitigación por diseño:** el `model_id` es configurable vía `Model_Id_Variable` sin redeploy de código (Req 4), de modo que puede escalarse a un modelo superior si la calidad no es suficiente. El default se mantiene en `qwen.qwen3-coder-30b-a3b-instruct` según el requisito.
+- **Idoneidad del LLM_Model (Qwen3 Coder 30B A3B).** Confirmado disponible y serverless en Bedrock `eu-west-1` y orientado a *agentic coding*, por lo que es adecuado para el caso de uso. Riesgo: al ser un modelo compacto (3B activos), la calidad del parche en stack traces complejos puede ser inferior a modelos mayores (Qwen3-Coder-480B) o a Claude Sonnet (alternativa citada en el steering). **Mitigación por diseño:** el `model_id` es configurable vía `Model_Id_Variable` sin redeploy de código (Req 4), de modo que puede escalarse a un modelo superior si la calidad no es suficiente. El default se mantiene en `qwen.qwen3-coder-30b-a3b-v1:0` según el requisito.
 - **Empaquetado del AgentCore_Runtime sin ECR.** AgentCore Runtime tradicionalmente exige imagen de contenedor ARM64 en ECR, lo que colisionaría con la prohibición de ECR del steering. Este diseño usa **direct code deployment** (zip + S3), disponible desde nov-2025, para cumplir "100% serverless sin ECR". Riesgo: es una capacidad reciente; si el soporte L2 de CDK para AgentCore Runtime con direct code deployment no está maduro, la fase de implementación deberá usar un escape hatch L1 (`Cfn*`) o un custom resource, documentándolo. Se debe verificar la versión de `aws-cdk-lib` y el soporte del recurso en el momento de implementar (iac-standards §7).
 - **Divergencia del contrato `ERROR:`.** El Metric_Filter depende del literal `ERROR:`. Si `todo-crud-api` cambia el prefijo de logging, la detección se rompe. Se documenta como contrato compartido; el modo reuse referencia los recursos existentes de `todo-crud-api` para no divergir.
 - **Alcance del PAT.** Aunque el agente nunca ve el token, el PAT debe crearse con permisos de repositorio mínimos (contenido + PRs sobre el Target_Repository). Se recomienda un fine-grained PAT restringido al repositorio objetivo. La carga del valor del secreto es una operación fuera de banda (no versionada).

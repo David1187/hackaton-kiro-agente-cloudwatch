@@ -1,7 +1,7 @@
 """Configuration utilities for the Self-Healing Agent."""
 from collections.abc import Mapping
 
-DEFAULT_MODEL_ID = "qwen.qwen3-coder-30b-a3b-instruct"
+DEFAULT_MODEL_ID = "qwen.qwen3-coder-30b-a3b-v1:0"
 
 
 def resolve_model_id(env: Mapping[str, str]) -> str:
