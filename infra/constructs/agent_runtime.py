@@ -7,23 +7,100 @@ JavaScript SDK that AwsCustomResource uses internally.
 The agent is deployed via direct code deployment (zip in S3, ARM64),
 without Docker/ECR, per architecture-guide.md section 2 and 3.
 
+AgentCore Runtime direct code deployment does NOT install requirements.txt
+automatically (same contract as an AWS Lambda .zip package): the uploaded
+artifact must already contain the resolved arm64 dependencies alongside the
+source files. The AgentCodeAsset below is therefore bundled with `uv pip
+install --python-platform aarch64-manylinux2014` (falling back to a
+Dockerized `pip install` if `uv` is unavailable on the machine running
+`cdk synth`), so the S3 asset that ends up wired into codeConfiguration
+contains a working, importable environment instead of bare source files.
+
 Key behavior: CreateAgentRuntime automatically creates V1 + DEFAULT endpoint,
 so no separate create_agent_runtime_endpoint call is needed.
 """
+import shutil
+import subprocess
+from pathlib import Path
+
 import aws_cdk as cdk
+import jsii
 from aws_cdk import (
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_s3_assets as s3_assets,
     custom_resources as cr,
+    BundlingOptions,
     CustomResource,
+    DockerImage,
     Duration,
+    ILocalBundling,
 )
 from constructs import Construct
 
 
+# Files/directories from the agent source tree that must never end up in the
+# deployment artifact (tests, caches, dev-only requirements). Kept in sync
+# with the exclude list previously passed to s3_assets.Asset.
+_BUNDLE_EXCLUDE_NAMES = {
+    "tests",
+    ".pytest_cache",
+    ".hypothesis",
+    "__pycache__",
+    "requirements-dev.txt",
+}
+
+
+@jsii.implements(ILocalBundling)
+class _UvArm64Bundling:
+    """Local bundling provider: installs arm64 wheels with `uv`, then copies source.
+
+    CDK calls `try_bundle(output_dir, ...)` before attempting Docker-based
+    bundling. Returning False here falls back to the Docker bundling
+    configured alongside this provider in BundlingOptions.
+    """
+
+    def __init__(self, agent_code_path: str) -> None:
+        self._agent_code_path = Path(agent_code_path)
+
+    def try_bundle(self, output_dir: str, options) -> bool:
+        requirements = self._agent_code_path / "requirements.txt"
+        try:
+            subprocess.run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python-platform",
+                    "aarch64-manylinux2014",
+                    "--python-version",
+                    "3.13",
+                    "--target",
+                    output_dir,
+                    "--only-binary=:all:",
+                    "-r",
+                    str(requirements),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+        for item in self._agent_code_path.iterdir():
+            if item.name in _BUNDLE_EXCLUDE_NAMES:
+                continue
+            destination = Path(output_dir) / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, destination)
+        return True
+
+
 # Default model ID (configurable via environment variable MODEL_ID at runtime)
-DEFAULT_MODEL_ID = "qwen.qwen3-coder-30b-a3b-instruct"
+DEFAULT_MODEL_ID = "qwen.qwen3-coder-30b-a3b-v1:0"
 
 
 # --- Custom Resource Lambda handler code for AgentCore Runtime management ---
@@ -77,6 +154,8 @@ def on_create(props):
         env_vars["MODEL_ID"] = props["ModelId"]
     if props.get("GatewayMcpUrl"):
         env_vars["GATEWAY_MCP_URL"] = props["GatewayMcpUrl"]
+    if props.get("AlarmFunctionMap"):
+        env_vars["ALARM_FUNCTION_MAP"] = props["AlarmFunctionMap"]
 
     create_params = {
         "agentRuntimeName": props["AgentRuntimeName"],
@@ -134,6 +213,8 @@ def on_update(event, props):
         env_vars["MODEL_ID"] = props["ModelId"]
     if props.get("GatewayMcpUrl"):
         env_vars["GATEWAY_MCP_URL"] = props["GatewayMcpUrl"]
+    if props.get("AlarmFunctionMap"):
+        env_vars["ALARM_FUNCTION_MAP"] = props["AlarmFunctionMap"]
 
     update_params = {
         "agentRuntimeId": runtime_id,
@@ -214,8 +295,10 @@ class AgentRuntime(Construct):
         *,
         agent_code_path: str,
         gateway_mcp_url: str = "",
+        gateway_arn: str = "",
         model_id: str = DEFAULT_MODEL_ID,
         log_group_arns: list[str] | None = None,
+        alarm_function_map_json: str = "",
     ) -> None:
         """Initialize the AgentCore Runtime construct.
 
@@ -224,8 +307,17 @@ class AgentRuntime(Construct):
             construct_id: Construct ID.
             agent_code_path: Path to the agent source directory (services/self_healing_agent/).
             gateway_mcp_url: URL of the AgentCore Gateway MCP endpoint.
+            gateway_arn: ARN of the AgentCore Gateway, used to scope the
+                bedrock-agentcore:InvokeGateway permission (the Gateway's
+                authorizerType=AWS_IAM requires the runtime's execution role
+                to hold this permission for SigV4-signed calls to succeed).
             model_id: Bedrock model ID (default, overridable at runtime via MODEL_ID env var).
             log_group_arns: ARNs of log groups the agent can read (for IAM scoping).
+            alarm_function_map_json: JSON string mapping CloudWatch alarm
+                names to their Lambda function names. The alarm's underlying
+                metric has no dimensions, so the EventBridge event never
+                carries the function name directly — the agent resolves it
+                from this synth-time map via the ALARM_FUNCTION_MAP env var.
         """
         super().__init__(scope, construct_id)
 
@@ -281,26 +373,138 @@ class AgentRuntime(Construct):
             )
         )
 
+        # Permission: Invoke the AgentCore Gateway (authorizerType=AWS_IAM).
+        # Required for the SigV4-signed MCP calls made via
+        # aws_iam_streamablehttp_client in agent.py; without it, correctly
+        # signed requests still fail with AccessDeniedException.
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InvokeAgentGateway",
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock-agentcore:InvokeGateway"],
+                resources=[gateway_arn] if gateway_arn else ["*"],
+            )
+        )
+
+        # Permissions required by AgentCore Runtime itself to operate the
+        # agent process (documented in AWS's "Execution role for running an
+        # agent in AgentCore Runtime" — see runtime-permissions.html).
+        # Without these, the runtime cannot create its own log group/stream,
+        # so no /aws/bedrock-agentcore/runtimes/* logs are ever produced and
+        # the agent's execution (or failure) is invisible.
+        runtime_log_group_arn = (
+            f"arn:aws:logs:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:"
+            "log-group:/aws/bedrock-agentcore/runtimes/*"
+        )
+        runtime_log_group_by_agent_arn = (
+            f"arn:aws:logs:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:"
+            "log-group:/aws/bedrock-agentcore/runtimes/self_healing_agent-*"
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeLogGroupManagement",
+                effect=iam.Effect.ALLOW,
+                actions=["logs:DescribeLogStreams", "logs:CreateLogGroup"],
+                resources=[runtime_log_group_arn],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeLogGroupResourcePolicy",
+                effect=iam.Effect.ALLOW,
+                actions=["logs:PutResourcePolicy"],
+                resources=[runtime_log_group_by_agent_arn],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeLogGroupDiscovery",
+                effect=iam.Effect.ALLOW,
+                actions=["logs:DescribeLogGroups"],
+                resources=[f"arn:aws:logs:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:log-group:*"],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeLogStreamWrite",
+                effect=iam.Effect.ALLOW,
+                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                resources=[f"{runtime_log_group_arn}:log-stream:*"],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeTracing",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                resources=["*"],
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RuntimeMetrics",
+                effect=iam.Effect.ALLOW,
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+                conditions={"StringEquals": {"cloudwatch:namespace": "bedrock-agentcore"}},
+            )
+        )
+        self.runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="GetAgentAccessToken",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "bedrock-agentcore:GetWorkloadAccessToken",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                ],
+                resources=[
+                    f"arn:aws:bedrock-agentcore:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:"
+                    "workload-identity-directory/default",
+                    f"arn:aws:bedrock-agentcore:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:"
+                    "workload-identity-directory/default/workload-identity/self_healing_agent-*",
+                ],
+            )
+        )
+
         # NOTE: NO secretsmanager:GetSecretValue — the agent never reads the PAT directly.
 
-        # --- Upload agent code as S3 asset ---
+        # --- Upload agent code + arm64 dependencies as a bundled S3 asset ---
+        # Direct code deployment needs the artifact to already contain the
+        # resolved dependencies (see module docstring). Bundling runs `uv`
+        # locally when available, otherwise falls back to `pip install`
+        # inside a Docker container targeting the same arm64/Python 3.13
+        # combination that AgentCore Runtime uses.
         self.code_asset = s3_assets.Asset(
             self,
             "AgentCodeAsset",
             path=agent_code_path,
-            exclude=[
-                "tests",
-                "tests/**",
-                ".pytest_cache",
-                ".pytest_cache/**",
-                ".hypothesis",
-                ".hypothesis/**",
-                "__pycache__",
-                "__pycache__/**",
-                "**/__pycache__",
-                "**/__pycache__/**",
-                "requirements-dev.txt",
-            ],
+            # NOTE: `exclude` has no effect once `bundling` is set (CDK docs).
+            # The tests/.pytest_cache/.hypothesis/__pycache__/requirements-dev.txt
+            # exclusions are enforced inside the bundling command/provider below.
+            bundling=BundlingOptions(
+                image=DockerImage.from_registry(
+                    "public.ecr.aws/docker/library/python:3.13-slim"
+                ),
+                platform="linux/arm64",
+                command=[
+                    "bash",
+                    "-c",
+                    "pip install --target /asset-output "
+                    "-r /asset-input/requirements.txt && "
+                    "find /asset-input -mindepth 1 -maxdepth 1 "
+                    "-not -name tests -not -name .pytest_cache "
+                    "-not -name .hypothesis -not -name __pycache__ "
+                    "-not -name requirements-dev.txt "
+                    "-exec cp -r {} /asset-output/ \\;",
+                ],
+                local=_UvArm64Bundling(agent_code_path),
+            ),
         )
 
         # Grant the AgentCore service read access to the S3 asset
@@ -372,6 +576,7 @@ class AgentRuntime(Construct):
                 "S3Key": self.code_asset.s3_object_key,
                 "ModelId": model_id,
                 "GatewayMcpUrl": gateway_mcp_url,
+                "AlarmFunctionMap": alarm_function_map_json,
             },
         )
 

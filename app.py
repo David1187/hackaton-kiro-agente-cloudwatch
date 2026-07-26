@@ -36,6 +36,7 @@ AgentStack(
     alarm_arns=stateless.alarm_arns,
     alarm_names=stateless.alarm_names,
     log_group_names=stateless.log_group_names,
+    function_names=stateless.function_names,
     env=env,
 )
 

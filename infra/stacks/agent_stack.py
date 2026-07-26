@@ -81,6 +81,7 @@ class AgentStack(cdk.Stack):
         alarm_arns: list[str],
         alarm_names: list[str],
         log_group_names: list[str] | None = None,
+        function_names: list[str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize the Agent stack.
@@ -91,9 +92,21 @@ class AgentStack(cdk.Stack):
             alarm_arns: CloudWatch Alarm ARNs from the StatelessStack.
             alarm_names: CloudWatch Alarm names (for EventBridge pattern matching).
             log_group_names: Log group names for CRUD Lambdas (optional, for create mode).
+            function_names: Lambda function names, index-aligned with alarm_names.
+                The alarm metric has no dimensions, so the EventBridge event
+                never carries the function name directly — it must be
+                resolved from a synth-time alarmName -> functionName map.
             **kwargs: Additional stack kwargs (env, etc.).
         """
         super().__init__(scope, construct_id, termination_protection=False, **kwargs)
+
+        # --- Build alarmName -> functionName map (synth-time, tokens OK) ---
+        # The Metric Filter behind each alarm has no dimensions, so the
+        # EventBridge "Alarm State Change" event never contains the Lambda
+        # function name. This map lets the agent resolve it from the one
+        # piece of stable identifying data the event does carry: alarmName.
+        alarm_function_map = dict(zip(alarm_names, function_names or []))
+        alarm_function_map_json = self.to_json_string(alarm_function_map)
 
         # --- Observability Wiring (reuse existing alarms from StatelessStack) ---
         observability = ObservabilityWiring(
@@ -118,7 +131,9 @@ class AgentStack(cdk.Stack):
             "AgentRuntime",
             agent_code_path=AGENT_CODE_PATH,
             gateway_mcp_url=gateway.gateway_mcp_url,
+            gateway_arn=gateway.gateway_arn,
             log_group_arns=log_group_arns,
+            alarm_function_map_json=alarm_function_map_json,
         )
 
         # --- Bridge Lambda: EventBridge → AgentCore Runtime ---

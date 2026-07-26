@@ -121,6 +121,7 @@ class StatelessStack(cdk.Stack):
         self._alarm_arns: list[str] = []
         self._alarm_names: list[str] = []
         self._log_group_names: list[str] = []
+        self._function_names: list[str] = []
 
         for name, fn in lambdas.items():
             log_group = logs.LogGroup(
@@ -160,6 +161,7 @@ class StatelessStack(cdk.Stack):
             )
             self._alarm_arns.append(alarm.alarm_arn)
             self._alarm_names.append(alarm.alarm_name)
+            self._function_names.append(fn.function_name)
 
         # ---------------------------------------------------------------
         # 7.4 — API Gateway REST API (OpenAPI with CDK token substitution)
@@ -265,3 +267,14 @@ class StatelessStack(cdk.Stack):
     def log_group_names(self) -> list[str]:
         """Log Group names for the CRUD Lambdas."""
         return self._log_group_names
+
+    @property
+    def function_names(self) -> list[str]:
+        """Lambda function names, index-aligned with alarm_names.
+
+        The alarm's underlying metric has no dimensions (see
+        MetricFilter above), so alarmName -> functionName cannot be
+        derived from the EventBridge event at runtime. This list lets
+        the agent stack build that mapping at synth time instead.
+        """
+        return self._function_names
