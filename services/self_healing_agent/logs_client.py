@@ -1,10 +1,21 @@
 """CloudWatch Logs client for retrieving error stack traces."""
+import json
 import logging
+import os
+import time
 
 import boto3
 import botocore.exceptions
 
 logger = logging.getLogger(__name__)
+
+# How far back to search for the triggering ERROR: entry. FilterLogEvents
+# without startTime does not reliably scan the most recent log stream first
+# once a log group has many streams (confirmed empirically: an unscoped call
+# returned zero matches with a nextToken, while the same call scoped to the
+# last few minutes found the real entries immediately). The alarm's
+# evaluation window plus invocation latency is well under this margin.
+_STACK_TRACE_LOOKBACK_SECONDS = 15 * 60
 
 # Lazy-initialized module-level client — reused across invocations (warm starts)
 # Uses a getter to avoid resolving credentials at import time (breaks tests).
@@ -31,16 +42,36 @@ def derive_log_group(function_name: str) -> str:
     return f"/aws/lambda/{function_name}"
 
 
+def _load_alarm_function_map() -> dict[str, str]:
+    """Load the alarmName -> functionName map from the ALARM_FUNCTION_MAP env var.
+
+    Built at CDK synth time (see infra/stacks/agent_stack.py) because the
+    Metric Filter behind each alarm has no dimensions, so the EventBridge
+    "Alarm State Change" event never carries the Lambda function name.
+
+    Returns:
+        The mapping dict, or an empty dict if unset/invalid.
+    """
+    raw = os.environ.get("ALARM_FUNCTION_MAP", "")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("ALARM_FUNCTION_MAP env var is not valid JSON; ignoring it")
+        return {}
+
+
 def derive_function_name(event: dict) -> str:
     """Extract the Lambda function name from an EventBridge alarm event.
 
-    The EventBridge event for CloudWatch Alarm State Change contains the alarm
-    name in detail.alarmName. The alarm naming convention from StatelessStack is
-    '{StackName}{AlarmLogicalId}' but the metric dimensions contain the function
-    name directly.
-
-    We extract from detail.configuration.metrics[0].metricStat.metric.dimensions.FunctionName
-    or fall back to parsing the alarm name.
+    The EventBridge event for CloudWatch Alarm State Change contains the
+    alarm name in detail.alarmName. The Metric Filter behind each alarm has
+    no dimensions (confirmed from a real event: "dimensions": {}), so the
+    function name can never be read from the event itself. It is resolved
+    via the ALARM_FUNCTION_MAP env var (alarmName -> functionName, built at
+    CDK synth time), with legacy metric-dimension parsing kept as a fallback
+    for forward compatibility.
 
     Args:
         event: The EventBridge event payload.
@@ -51,11 +82,17 @@ def derive_function_name(event: dict) -> str:
     Raises:
         ValueError: If the function name cannot be derived from the event.
     """
-    try:
-        # Try to get from metric dimensions (most reliable)
-        detail = event.get("detail", {})
+    detail = event.get("detail", {})
+    alarm_name = detail.get("alarmName", "")
 
-        # Path: detail.configuration.metrics[0].metricStat.metric.dimensions.FunctionName
+    # Primary path: synth-time alarmName -> functionName map.
+    if alarm_name:
+        function_name = _load_alarm_function_map().get(alarm_name)
+        if function_name:
+            return function_name
+
+    try:
+        # Fallback: metric dimensions (works if a future alarm does set them).
         configuration = detail.get("configuration", {})
         metrics = configuration.get("metrics", [])
         if metrics:
@@ -66,19 +103,10 @@ def derive_function_name(event: dict) -> str:
             if function_name:
                 return function_name
 
-        # Fallback: try to parse from alarm name or namespace
-        # The alarm description contains the function context
-        alarm_name = detail.get("alarmName", "")
-        if alarm_name:
-            # Our alarms follow pattern: {StackId}Alarm{Operation}...
-            # but the most reliable is the metric namespace + dimensions
-            pass
-
         # Last resort: look in the state change reason which may reference the log group
         state = detail.get("state", {})
         reason = state.get("reason", "")
         if "/aws/lambda/" in reason:
-            # Extract function name from log group reference
             parts = reason.split("/aws/lambda/")
             if len(parts) > 1:
                 return parts[1].split(" ")[0].split('"')[0].strip()
@@ -88,7 +116,7 @@ def derive_function_name(event: dict) -> str:
 
     raise ValueError(
         f"Cannot derive Lambda function name from EventBridge event. "
-        f"Event keys: {list(event.get('detail', {}).keys())}"
+        f"alarmName={alarm_name!r}, event detail keys: {list(detail.keys())}"
     )
 
 
@@ -106,11 +134,13 @@ def get_latest_stack_trace(log_group: str, logs_client=None) -> str | None:
         The error message/stack trace string, or None if no errors found.
     """
     client = logs_client or _get_logs_client()
+    start_time_ms = int((time.time() - _STACK_TRACE_LOOKBACK_SECONDS) * 1000)
 
     try:
         response = client.filter_log_events(
             logGroupName=log_group,
             filterPattern='"ERROR:"',
+            startTime=start_time_ms,
             limit=5,
             interleaved=True,
         )

@@ -228,7 +228,18 @@ class TestDeriveLogGroup:
 class TestDeriveFunctionName:
     """Tests for derive_function_name."""
 
-    def test_extracts_from_metric_dimensions(self):
+    def test_extracts_from_alarm_function_map_env_var(self, monkeypatch):
+        """Primary path: ALARM_FUNCTION_MAP env var built at CDK synth time."""
+        monkeypatch.setenv(
+            "ALARM_FUNCTION_MAP",
+            '{"TestAlarm": "my-lambda-fn"}',
+        )
+        event = {"detail": {"alarmName": "TestAlarm"}}
+        assert derive_function_name(event) == "my-lambda-fn"
+
+    def test_extracts_from_metric_dimensions_when_map_absent(self, monkeypatch):
+        """Fallback path: metric dimensions, used only if the map lookup misses."""
+        monkeypatch.delenv("ALARM_FUNCTION_MAP", raising=False)
         event = {
             "detail": {
                 "alarmName": "TestAlarm",
@@ -249,11 +260,47 @@ class TestDeriveFunctionName:
         }
         assert derive_function_name(event) == "my-lambda-fn"
 
-    def test_raises_on_empty_event(self):
+    def test_map_takes_priority_over_dimensions(self, monkeypatch):
+        """When both are present, the ALARM_FUNCTION_MAP wins."""
+        monkeypatch.setenv(
+            "ALARM_FUNCTION_MAP",
+            '{"TestAlarm": "from-map-fn"}',
+        )
+        event = {
+            "detail": {
+                "alarmName": "TestAlarm",
+                "configuration": {
+                    "metrics": [
+                        {
+                            "metricStat": {
+                                "metric": {"dimensions": {"FunctionName": "from-dimensions-fn"}}
+                            }
+                        }
+                    ]
+                },
+            }
+        }
+        assert derive_function_name(event) == "from-map-fn"
+
+    def test_raises_on_empty_event(self, monkeypatch):
+        monkeypatch.delenv("ALARM_FUNCTION_MAP", raising=False)
         with pytest.raises(ValueError):
             derive_function_name({})
 
-    def test_raises_on_no_dimensions(self):
+    def test_raises_on_no_dimensions(self, monkeypatch):
+        monkeypatch.delenv("ALARM_FUNCTION_MAP", raising=False)
+        event = {
+            "detail": {
+                "alarmName": "TestAlarm",
+                "configuration": {"metrics": []},
+            }
+        }
+        with pytest.raises(ValueError):
+            derive_function_name(event)
+
+    def test_raises_when_alarm_name_not_in_map(self, monkeypatch):
+        """Alarm name present but absent from the map falls through to fallback paths."""
+        monkeypatch.setenv("ALARM_FUNCTION_MAP", '{"OtherAlarm": "other-fn"}')
         event = {
             "detail": {
                 "alarmName": "TestAlarm",
