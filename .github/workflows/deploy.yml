@@ -1,0 +1,75 @@
+name: Deploy CDK Stacks
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: CDK Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Set up Node.js (for CDK CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: CDK Synth
+        run: cdk synth --all
+
+      - name: CDK Diff (show pending changes)
+        run: cdk diff --all 2>&1 | tee cdk-diff-output.txt
+
+      - name: Upload diff as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-diff
+          path: cdk-diff-output.txt
+
+      - name: CDK Deploy
+        run: cdk deploy --all --require-approval never --outputs-file cdk-outputs.json
+
+      - name: Verify stack status
+        run: |
+          for stack in TodoCrudStatefulStack TodoCrudStatelessStack SelfHealingAgentStack; do
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$stack" --region eu-west-1 --query "Stacks[0].StackStatus" --output text)
+            echo "✅ $stack: $STATUS"
+            if [[ "$STATUS" != *"COMPLETE"* ]]; then
+              echo "❌ ERROR: $stack is in unexpected state: $STATUS"
+              exit 1
+            fi
+          done
+
+      - name: Upload deploy outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-outputs
+          path: cdk-outputs.json
