@@ -73,18 +73,63 @@ GATEWAY_MCP_URL = os.environ.get("GATEWAY_MCP_URL", "")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
 
 # System prompt for the agent's LLM
-SYSTEM_PROMPT = """You are a Self-Healing Agent that fixes Python Lambda function errors.
+SYSTEM_PROMPT = """You are a Self-Healing Agent. You fix Python Lambda errors by creating a Pull Request on GitHub.
 
-When given an error stack trace and the source code that caused it, you must:
-1. Identify the root cause of the error
-2. Generate a complete fixed version of the file that:
-   - Adds proper try-except blocks with specific exception handling
-   - Validates input parameters before use
-   - Uses logging.error(..., exc_info=True) for error reporting (never print())
-   - Preserves the existing business logic (CRUD operations on DynamoDB)
-   - Follows Python best practices for defensive programming
+CRITICAL RULES:
+- You MUST use tools to perform actions. NEVER output code as plain text.
+- You MUST complete the steps below IN ORDER, exactly once each. Do NOT repeat any step.
+- Do NOT call github-mcp___get_me or github-mcp___get_commit — they are unnecessary.
+- Do NOT loop or re-read files you have already read.
+- After creating the Pull Request, STOP immediately. Your job is done.
 
-Return ONLY the complete fixed file content, no explanations or markdown fences."""
+EXACT STEPS (execute once each, in this order):
+
+Step 1: Read the broken file.
+  Tool: github-mcp___get_file_contents
+  Params: owner, repo, path (provided in the prompt)
+
+Step 2: Analyze the error and generate the COMPLETE fixed file content in memory.
+  The fix must:
+  - Add try-except with specific exceptions (botocore.exceptions.ClientError, ParamValidationError) before a generic except Exception
+  - Validate input parameters before use
+  - Use logging.error(..., exc_info=True) — never print()
+  - Preserve existing DynamoDB CRUD logic
+
+Step 3: Create a branch from main.
+  Tool: github-mcp___create_branch
+  Params: owner, repo, branch (provided in the prompt), from_ref="main"
+
+Step 4: Write the fixed file to the new branch.
+  Tool: github-mcp___create_or_update_file_contents
+  Params: owner, repo, path (same file), branch (the new branch), message="fix: auto-heal <function_name>", content=<the complete fixed file>
+
+Step 5: Open a Pull Request.
+  Tool: github-mcp___create_pull_request
+  Params: owner, repo, title (provided), body (provided), head=<branch>, base="main"
+
+After Step 5, STOP. Do NOT merge or approve the PR. Do NOT repeat any step."""
+
+
+# Option B: system prompt for PURE code generation (no tool use).
+# The LLM only rewrites the file; Python orchestrates the MCP calls
+# deterministically. Nova/qwen produce malformed toolUse blocks with the
+# GitHub MCP schemas, so we never let the model emit tool calls.
+CODE_FIX_SYSTEM_PROMPT = """You are an expert Python engineer that fixes AWS Lambda handlers.
+
+You will receive an error stack trace and the current content of a Python file.
+Your job is to return the COMPLETE corrected content of that file.
+
+Rules for the fix:
+- Wrap DynamoDB/boto3 I/O in try-except, catching botocore.exceptions.ClientError
+  and botocore.exceptions.ParamValidationError BEFORE a generic except Exception.
+- Validate input parameters (event keys, body attributes) before using them, to
+  avoid uncontrolled KeyError/TypeError.
+- Use logging.error(..., exc_info=True) for errors — never print().
+- Preserve the existing DynamoDB CRUD logic and the handler's HTTP response format.
+- Keep all imports the file needs.
+
+Output ONLY the raw corrected Python source code for the whole file.
+Do NOT add markdown code fences, explanations, or any commentary."""
 
 
 def _get_lambda_tags(function_name: str) -> dict:
@@ -216,12 +261,20 @@ def handle_event(event: dict) -> dict:
 
         # Initialize the LLM model
         model_id = resolve_model_id(os.environ)
-        bedrock_model = BedrockModel(model_id=model_id, temperature=0.3)
+        bedrock_model = BedrockModel(model_id=model_id, temperature=0, streaming=False)
 
         # Connect to GitHub MCP via AgentCore Gateway. The Gateway enforces
         # authorizerType=AWS_IAM (see infra/constructs/agent_gateway.py), so
         # requests must be SigV4-signed with the runtime's execution role
         # credentials — aws_iam_streamablehttp_client handles that signing.
+        #
+        # The MCPClient MUST be used as a context manager so it connects to
+        # the Gateway and discovers the available tools. After connecting, we
+        # call list_tools_sync() to get the MCPAgentTool instances and pass
+        # them directly to the Agent — passing the MCPClient object itself
+        # does NOT work because it is neither an AgentTool nor an iterable
+        # of tools (strands registry rejects it as "unrecognized tool
+        # specification").
         mcp_client = MCPClient(
             lambda: aws_iam_streamablehttp_client(
                 endpoint=GATEWAY_MCP_URL,
@@ -230,34 +283,324 @@ def handle_event(event: dict) -> dict:
             )
         )
 
-        # Create the agent with MCP tools
-        agent = Agent(
-            model=bedrock_model,
-            tools=[mcp_client],
-            system_prompt=SYSTEM_PROMPT,
-        )
+        with mcp_client:
+            # Discover available GitHub MCP tools via the Gateway
+            mcp_tools = mcp_client.list_tools_sync()
+            logger.info(
+                "Discovered %d MCP tools from Gateway", len(mcp_tools)
+            )
 
-        # Compose the prompt for the agent
-        prompt = (
-            f"A Lambda function '{function_name}' in repository '{repo_full}' "
-            f"has thrown an error. Here is the stack trace from CloudWatch Logs:\n\n"
-            f"```\n{stack_trace}\n```\n\n"
-            f"Please:\n"
-            f"1. Use the get_file_contents tool to read the source file that caused the error "
-            f"(look at the file paths in the stack trace, they'll be under 'services/crud_api/')\n"
-            f"2. Analyze the error and generate a fixed version of the file\n"
-            f"3. Create a new branch named '{branch_name}' from 'main'\n"
-            f"4. Write the fixed file to the new branch\n"
-            f"5. Create a Pull Request with title '{build_pr_title(function_name)}'\n\n"
-            f"The PR description should be:\n"
-            f"{build_pr_description(function_name, stack_trace[:500])}\n\n"
-            f"IMPORTANT: Never merge or approve the PR. Only create it for human review."
-        )
+            # Option B: call the MCP tools deterministically from Python (below)
+            # instead of letting the model emit toolUse blocks. Nova/qwen produce
+            # malformed toolUse sequences with the GitHub MCP schemas
+            # ("invalid sequence as part of ToolUse"). The LLM is used ONLY to
+            # generate the fixed file content as plain text.
+            available_tool_names = {
+                getattr(t, "tool_name", getattr(t, "name", "")) for t in mcp_tools
+            }
+            logger.info("Available MCP tools: %s", sorted(available_tool_names))
 
-        # Execute the agent
-        logger.info("Invoking agent with model=%s", model_id)
-        response = agent(prompt)
-        logger.info("Agent completed successfully")
+            def _resolve_tool(*candidates: str) -> str:
+                """Resolve an available MCP tool name, tolerating naming variations."""
+                for cand in candidates:
+                    if cand in available_tool_names:
+                        return cand
+                # Fallback: partial match on the bare tool name (after the ___ prefix)
+                for tool_name in available_tool_names:
+                    if any(cand.split("___")[-1] in tool_name for cand in candidates):
+                        return tool_name
+                raise RuntimeError(f"Required MCP tool not found among {sorted(available_tool_names)}: {candidates}")
+
+            tool_get_file = _resolve_tool("github-mcp___get_file_contents")
+            tool_create_branch = _resolve_tool("github-mcp___create_branch")
+            tool_write_file = _resolve_tool(
+                "github-mcp___create_or_update_file_contents",
+                "github-mcp___create_or_update_file",
+            )
+            tool_create_pr = _resolve_tool("github-mcp___create_pull_request")
+
+            # DIAGNOSTIC: log the input schema of each resolved tool so we can
+            # confirm the exact expected parameter names/requirements.
+            _tool_by_name = {
+                getattr(t, "tool_name", getattr(t, "name", "")): t for t in mcp_tools
+            }
+            for _tn in (tool_get_file, tool_create_branch, tool_write_file, tool_create_pr):
+                _t = _tool_by_name.get(_tn)
+                try:
+                    _spec = _t.tool_spec if _t is not None else None
+                    logger.info("TOOL SCHEMA %s: %s", _tn, json.dumps(_spec, default=str)[:1500])
+                except Exception as _e:
+                    logger.warning("Could not read tool_spec for %s: %s", _tn, _e)
+
+            # LLM agent WITHOUT tools — pure text generation of the corrected file.
+            codegen_agent = Agent(
+                model=bedrock_model,
+                system_prompt=CODE_FIX_SYSTEM_PROMPT,
+            )
+
+            # DIAGNOSTIC: isolate whether the Gateway->GitHub path works at all.
+            # - get_me: no args, tests credentials/Gateway (returns JSON text).
+            # - get_file_contents path="/": directory listing (JSON text).
+            # - get_file_contents on the file: the currently-failing call (blob).
+            def _diag(label, tool, args):
+                try:
+                    r = mcp_client.call_tool_sync(
+                        tool_use_id=f"diag-{label}", name=tool, arguments=args
+                    )
+                    st = r.get("status") if isinstance(r, dict) else getattr(r, "status", None)
+                    logger.info("DIAG %s -> status=%s raw=%s", label, st, repr(r)[:600])
+                except Exception as _e:
+                    logger.warning("DIAG %s raised: %s", label, _e)
+
+            _diag("get_me", _resolve_tool("github-mcp___get_me"), {})
+            _diag("dir_list", tool_get_file, {"owner": "David1187", "repo": "hackaton-kiro-agente-cloudwatch", "path": "/"})
+            _diag("file", tool_get_file, {"owner": "David1187", "repo": "hackaton-kiro-agente-cloudwatch", "path": "services/crud_api/handlers/update_task.py"})
+
+            # --- Parse the file path from the stack trace ---
+            # Lambda runtime paths look like /var/task/handlers/update_task.py
+            # or /var/task/common/repository.py (no services/crud_api/ prefix).
+            # Full repo paths (services/crud_api/...) are unlikely but handled.
+            file_path = None
+            also_read_common = False  # Flag if common/ module is involved
+
+            # First pass: check if common/repository.py is anywhere in the trace
+            if "common/repository.py" in stack_trace:
+                also_read_common = True
+
+            # Second pass: find the handler file path
+            for trace_line in stack_trace.splitlines():
+                trace_line_stripped = trace_line.strip()
+                if 'File "' not in trace_line_stripped:
+                    continue
+
+                # Extract path between quotes
+                start = trace_line_stripped.index('File "') + len('File "')
+                end = trace_line_stripped.index('"', start)
+                raw_path = trace_line_stripped[start:end]
+
+                # Case 1: Full repo path (services/crud_api/handlers/...)
+                if "services/crud_api/handlers/" in raw_path:
+                    svc_idx = raw_path.find("services/crud_api/handlers/")
+                    file_path = raw_path[svc_idx:]
+                    break
+
+                # Case 2: Lambda runtime path (handlers/xxx.py without prefix)
+                if "handlers/" in raw_path and raw_path.endswith(".py"):
+                    handler_idx = raw_path.find("handlers/")
+                    relative_path = raw_path[handler_idx:]
+                    file_path = f"services/crud_api/{relative_path}"
+                    break
+
+            if not file_path:
+                # Fallback: map from Lambda function name pattern to handler file
+                fn_upper = function_name.upper()
+                if "FNUPDATE" in fn_upper or "UPDATE" in fn_upper:
+                    file_path = "services/crud_api/handlers/update_task.py"
+                elif "FNCREATE" in fn_upper or "CREATE" in fn_upper:
+                    file_path = "services/crud_api/handlers/create_task.py"
+                elif "FNGET" in fn_upper or "GET" in fn_upper:
+                    file_path = "services/crud_api/handlers/get_task.py"
+                elif "FNDELETE" in fn_upper or "DELETE" in fn_upper:
+                    file_path = "services/crud_api/handlers/delete_task.py"
+                elif "FNLIST" in fn_upper or "LIST" in fn_upper:
+                    file_path = "services/crud_api/handlers/list_tasks.py"
+                else:
+                    file_path = "services/crud_api/handlers/update_task.py"
+                logger.warning(
+                    "Could not parse file path from stack trace, using fallback: %s",
+                    file_path,
+                )
+
+            result["details"]["file_path"] = file_path
+
+            pr_title = build_pr_title(function_name)
+            pr_body = build_pr_description(function_name, stack_trace[:500])
+
+            OWNER = "David1187"
+            REPO = "hackaton-kiro-agente-cloudwatch"
+
+            def _mcp_call(tool_name: str, arguments: dict, retries: int = 4) -> tuple:
+                """Call an MCP tool and return (status, combined_text).
+
+                Retries on transient Gateway/MCP errors ("internal error",
+                "retry later", rate limiting), which the GitHub MCP surfaces
+                intermittently, with exponential backoff.
+                """
+                import time as _time
+
+                status, text = None, ""
+                for attempt in range(retries):
+                    res = mcp_client.call_tool_sync(
+                        tool_use_id=f"{tool_name}-{int(timestamp.timestamp())}-{attempt}",
+                        name=tool_name,
+                        arguments=arguments,
+                    )
+                    if isinstance(res, dict):
+                        status = res.get("status")
+                        content_blocks = res.get("content") or []
+                    else:
+                        status = getattr(res, "status", None)
+                        content_blocks = getattr(res, "content", None) or []
+                    text = "\n".join(
+                        b.get("text", "")
+                        for b in content_blocks
+                        if isinstance(b, dict) and "text" in b
+                    )
+                    if status == "success":
+                        return status, text
+
+                    # DIAGNOSTIC: surface the full raw result + arguments so the
+                    # real cause behind the generic "internal error" is visible.
+                    logger.warning(
+                        "MCP tool '%s' non-success (status=%s). args=%s raw=%s",
+                        tool_name,
+                        status,
+                        json.dumps(arguments, default=str)[:500],
+                        repr(res)[:1000],
+                    )
+
+                    lowered = text.lower()
+                    transient = (
+                        "internal error" in lowered
+                        or "retry later" in lowered
+                        or "rate limit" in lowered
+                        or "timeout" in lowered
+                        or "timed out" in lowered
+                    )
+                    if not transient or attempt == retries - 1:
+                        return status, text
+                    backoff = 2 ** attempt
+                    logger.warning(
+                        "MCP tool '%s' transient error (attempt %d/%d), retrying in %ds: %s",
+                        tool_name,
+                        attempt + 1,
+                        retries,
+                        backoff,
+                        text[:200],
+                    )
+                    _time.sleep(backoff)
+                return status, text
+
+            # --- Step 1: Read the buggy file via MCP (deterministic) ---
+            status, file_text = _mcp_call(
+                tool_get_file, {"owner": OWNER, "repo": REPO, "path": file_path}
+            )
+            if status != "success":
+                raise RuntimeError(f"get_file_contents failed: {file_text[:500]}")
+
+            # GitHub MCP may return JSON metadata (base64 content + sha) or raw text.
+            current_source = file_text
+            file_sha = None
+            try:
+                meta = json.loads(file_text)
+                if isinstance(meta, dict):
+                    file_sha = meta.get("sha")
+                    if meta.get("content"):
+                        import base64 as _b64
+                        if meta.get("encoding", "base64") == "base64":
+                            current_source = _b64.b64decode(meta["content"]).decode(
+                                "utf-8", "replace"
+                            )
+                        else:
+                            current_source = meta["content"]
+            except (ValueError, TypeError):
+                pass  # Not JSON — treat the returned text as the raw file source
+
+            # Optionally read the shared repository module for extra context.
+            common_context = ""
+            if also_read_common:
+                c_status, c_text = _mcp_call(
+                    tool_get_file,
+                    {
+                        "owner": OWNER,
+                        "repo": REPO,
+                        "path": "services/crud_api/common/repository.py",
+                    },
+                )
+                if c_status == "success":
+                    common_source = c_text
+                    try:
+                        c_meta = json.loads(c_text)
+                        if isinstance(c_meta, dict) and c_meta.get("content"):
+                            import base64 as _b64
+                            if c_meta.get("encoding", "base64") == "base64":
+                                common_source = _b64.b64decode(c_meta["content"]).decode(
+                                    "utf-8", "replace"
+                                )
+                    except (ValueError, TypeError):
+                        pass
+                    common_context = (
+                        "\n\n=== SHARED MODULE (services/crud_api/common/repository.py, "
+                        "for context only — apply the fix in the handler file) ===\n"
+                        f"{common_source}"
+                    )
+
+            # --- Step 2: Generate the COMPLETE fixed file (LLM, text only) ---
+            codegen_prompt = (
+                "Fix the bug in the following Python AWS Lambda handler.\n\n"
+                f"=== ERROR STACK TRACE ===\n{stack_trace}\n\n"
+                f"=== CURRENT FILE ({file_path}) ===\n{current_source}"
+                f"{common_context}\n\n"
+                "Return ONLY the complete corrected content of the handler file "
+                f"({file_path}). No markdown fences, no commentary."
+            )
+            logger.info("Generating fix with model=%s (no tools)", model_id)
+            llm_response = codegen_agent(codegen_prompt)
+            fixed_source = str(llm_response).strip()
+
+            # Strip markdown fences if the model added them despite instructions.
+            if fixed_source.startswith("```"):
+                fence_lines = fixed_source.splitlines()
+                if fence_lines and fence_lines[0].startswith("```"):
+                    fence_lines = fence_lines[1:]
+                if fence_lines and fence_lines[-1].strip() == "```":
+                    fence_lines = fence_lines[:-1]
+                fixed_source = "\n".join(fence_lines).strip()
+
+            if not fixed_source:
+                raise RuntimeError("LLM produced an empty fixed source file")
+
+            # --- Step 3: Create the fix branch from main (deterministic) ---
+            status, branch_out = _mcp_call(
+                tool_create_branch,
+                {"owner": OWNER, "repo": REPO, "branch": branch_name, "from_ref": "main"},
+            )
+            if status != "success":
+                # Non-fatal: the branch may already exist from a previous run.
+                logger.warning("create_branch status=%s: %s", status, branch_out[:300])
+
+            # --- Step 4: Write the fixed file to the branch ---
+            write_args = {
+                "owner": OWNER,
+                "repo": REPO,
+                "path": file_path,
+                "branch": branch_name,
+                "message": f"fix: auto-heal {function_name}",
+                "content": fixed_source,
+            }
+            if file_sha:
+                write_args["sha"] = file_sha
+            status, write_out = _mcp_call(tool_write_file, write_args)
+            if status != "success":
+                raise RuntimeError(f"create_or_update_file failed: {write_out[:500]}")
+
+            # --- Step 5: Open the Pull Request (never merge) ---
+            status, pr_out = _mcp_call(
+                tool_create_pr,
+                {
+                    "owner": OWNER,
+                    "repo": REPO,
+                    "title": pr_title,
+                    "body": pr_body,
+                    "head": branch_name,
+                    "base": "main",
+                },
+            )
+            if status != "success":
+                raise RuntimeError(f"create_pull_request failed: {pr_out[:500]}")
+
+            logger.info("Pull request opened successfully (branch=%s)", branch_name)
+            response = pr_out
 
         result["status"] = "success"
         result["details"]["model_id"] = model_id

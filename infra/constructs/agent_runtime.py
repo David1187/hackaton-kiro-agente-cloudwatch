@@ -100,7 +100,7 @@ class _UvArm64Bundling:
 
 
 # Default model ID (configurable via environment variable MODEL_ID at runtime)
-DEFAULT_MODEL_ID = "qwen.qwen3-coder-30b-a3b-v1:0"
+DEFAULT_MODEL_ID = "eu.amazon.nova-pro-v1:0"
 
 
 # --- Custom Resource Lambda handler code for AgentCore Runtime management ---
@@ -163,6 +163,8 @@ def on_create(props):
         "roleArn": props["RoleArn"],
         "agentRuntimeArtifact": artifact_config,
         "networkConfiguration": {"networkMode": "PUBLIC"},
+        "sessionIdleTimeout": 600,
+        "runtimeLifecycleConfiguration": {"runtimeLifecycleTimeout": 900},
     }
 
     if env_vars:
@@ -229,10 +231,16 @@ def on_update(event, props):
     try:
         resp = client.update_agent_runtime(**update_params)
         logger.info("Updated runtime: %s (status=%s)", runtime_id, resp.get("status"))
+        runtime_arn = resp.get("agentRuntimeArn", "")
     except Exception as e:
         logger.warning("Failed to update runtime (non-fatal): %s", e)
+        # Fallback: reconstruct ARN from get_agent_runtime
+        try:
+            get_resp = client.get_agent_runtime(agentRuntimeId=runtime_id)
+            runtime_arn = get_resp.get("agentRuntimeArn", "")
+        except Exception:
+            runtime_arn = ""
 
-    runtime_arn = resp.get("agentRuntimeArn", "")
     endpoint_arn = f"{runtime_arn}/endpoint/DEFAULT"
 
     return {

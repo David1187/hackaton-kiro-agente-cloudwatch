@@ -53,12 +53,14 @@ def handler(event, context):
     logger.info("Received EventBridge event: %s", json.dumps(event))
     try:
         payload = json.dumps({"input": {"prompt": json.dumps(event)}})
+        runtimeSessionId = context.aws_request_id + "0" * (33 - len(context.aws_request_id))
         response = client.invoke_agent_runtime(
             agentRuntimeArn=AGENT_RUNTIME_ARN,
-            runtimeSessionId=context.aws_request_id + "0" * (33 - len(context.aws_request_id)),
+            runtimeSessionId=runtimeSessionId,
             payload=payload,
             qualifier=AGENT_RUNTIME_ENDPOINT_ID,
         )
+        logger.info("Runtime SessionId AgentCore: %s",runtimeSessionId)
         logger.info("AgentCore invocation successful")
         return {"statusCode": 200, "body": "Agent invoked"}
     except botocore.exceptions.ClientError as exc:
