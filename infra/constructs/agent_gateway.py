@@ -143,6 +143,49 @@ def on_create(props):
     target_id = target_resp.get("targetId", "")
     logger.info("Created gateway target: %s", target_id)
 
+    # Step 5: Enable service-provided (vended) logs for the Gateway.
+    # AgentCore does NOT create a CloudWatch log group for gateway resources
+    # automatically (unlike Runtime, which does). Without this, errors like
+    # AccessDeniedException on the outbound credential fetch are invisible
+    # outside exceptionLevel=DEBUG probing of individual tool calls.
+    log_group_name = f"/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/{gateway_id}"
+    logs_client = boto3.client("logs")
+    try:
+        logs_client.create_log_group(logGroupName=log_group_name)
+        logger.info("Created log group: %s", log_group_name)
+    except logs_client.exceptions.ResourceAlreadyExistsException:
+        logger.info("Log group already exists: %s", log_group_name)
+    log_group_arn = (
+        f"arn:aws:logs:{boto3.session.Session().region_name}:"
+        f"{boto3.client('sts').get_caller_identity()['Account']}:log-group:{log_group_name}"
+    )
+
+    delivery_source_name = f"{gateway_id}-logs-source"
+    delivery_destination_name = f"{gateway_id}-logs-destination"
+    logs_client.put_delivery_source(
+        name=delivery_source_name,
+        logType="APPLICATION_LOGS",
+        resourceArn=gateway_arn,
+    )
+    dest_resp = logs_client.put_delivery_destination(
+        name=delivery_destination_name,
+        deliveryDestinationType="CWL",
+        deliveryDestinationConfiguration={"destinationResourceArn": log_group_arn},
+    )
+    delivery_destination_arn = dest_resp["deliveryDestination"]["arn"]
+    delivery_resp = logs_client.create_delivery(
+        deliverySourceName=delivery_source_name,
+        deliveryDestinationArn=delivery_destination_arn,
+    )
+    delivery_id = delivery_resp["delivery"]["id"]
+    logger.info(
+        "Enabled gateway log delivery: source=%s destination=%s delivery=%s log_group=%s",
+        delivery_source_name,
+        delivery_destination_name,
+        delivery_id,
+        log_group_name,
+    )
+
     # Physical resource ID is the gateway ID (used in Delete)
     return {
         "PhysicalResourceId": gateway_id,
@@ -152,6 +195,10 @@ def on_create(props):
             "GatewayUrl": gateway_url,
             "TargetId": target_id,
             "CredentialProviderArn": cred_provider_arn,
+            "LogGroupName": log_group_name,
+            "DeliveryId": delivery_id,
+            "DeliverySourceName": delivery_source_name,
+            "DeliveryDestinationName": delivery_destination_name,
         },
     }
 
@@ -207,9 +254,37 @@ def on_update(event, props):
 
 
 def on_delete(event, props):
-    \"\"\"Delete Gateway Target, Credential Provider, and Gateway.\"\"\"
+    \"\"\"Delete Gateway Target, Credential Provider, Log Delivery, and Gateway.\"\"\"
     client = boto3.client("bedrock-agentcore-control")
     gateway_id = event["PhysicalResourceId"]
+
+    # Delete log delivery resources first (delivery -> delivery source ->
+    # delivery destination), per AWS guidance on removing vended log delivery
+    # when the log-generating resource is deleted.
+    logs_client = boto3.client("logs")
+    delivery_source_name = f"{gateway_id}-logs-source"
+    delivery_destination_name = f"{gateway_id}-logs-destination"
+    try:
+        deliveries = logs_client.describe_deliveries().get("deliveries", [])
+        for d in deliveries:
+            if d.get("deliverySourceName") == delivery_source_name:
+                try:
+                    logs_client.delete_delivery(id=d["id"])
+                    logger.info("Deleted delivery: %s", d["id"])
+                except Exception as e:
+                    logger.warning("Failed to delete delivery %s: %s", d.get("id"), e)
+    except Exception as e:
+        logger.warning("Failed to list/delete deliveries: %s", e)
+    try:
+        logs_client.delete_delivery_source(name=delivery_source_name)
+        logger.info("Deleted delivery source: %s", delivery_source_name)
+    except Exception as e:
+        logger.warning("Failed to delete delivery source: %s", e)
+    try:
+        logs_client.delete_delivery_destination(name=delivery_destination_name)
+        logger.info("Deleted delivery destination: %s", delivery_destination_name)
+    except Exception as e:
+        logger.warning("Failed to delete delivery destination: %s", e)
 
     # Best-effort cleanup: delete target first, then credential provider, then gateway
     # Ignore errors on delete to avoid stuck stacks
@@ -328,6 +403,26 @@ class AgentGateway(Construct):
             )
         )
 
+        # Permission to read the INTERNAL secret that AgentCore Identity creates
+        # when create_api_key_credential_provider runs (distinct from self.secret,
+        # which only holds our copy of the PAT). At tools/call time, the Gateway
+        # assumes this role and must call secretsmanager:GetSecretValue on that
+        # internal secret to inject the credential into the outbound request to
+        # the MCP target — without this, every tools/call fails with
+        # AccessDeniedException even though tools/list (metadata only) still
+        # works and the gateway/target both report status=READY.
+        self.gateway_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ReadAgentCoreIdentityApiKeySecret",
+                effect=iam.Effect.ALLOW,
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    f"arn:aws:secretsmanager:{cdk.Aws.REGION}:{cdk.Aws.ACCOUNT_ID}:"
+                    "secret:bedrock-agentcore-identity!default/apikey/*"
+                ],
+            )
+        )
+
         # --- Custom Resource Provider Lambda ---
         provider_fn = lambda_.Function(
             self,
@@ -383,6 +478,40 @@ class AgentGateway(Construct):
             )
         )
 
+        # Permissions for the provider Lambda to enable vended log delivery
+        # for the Gateway (log group + delivery source/destination/delivery).
+        # AgentCore does not create these automatically for Gateway resources.
+        provider_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="ConfigureGatewayLogDelivery",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:PutDeliverySource",
+                    "logs:PutDeliveryDestination",
+                    "logs:CreateDelivery",
+                    "logs:DeleteDelivery",
+                    "logs:DeleteDeliverySource",
+                    "logs:DeleteDeliveryDestination",
+                    "logs:DescribeDeliveries",
+                    "logs:DescribeDeliverySources",
+                    "logs:DescribeDeliveryDestinations",
+                    "logs:PutResourcePolicy",
+                    "logs:DescribeResourcePolicies",
+                    "logs:DescribeLogGroups",
+                ],
+                resources=["*"],
+            )
+        )
+        provider_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="ResolveAccountIdForLogGroupArn",
+                effect=iam.Effect.ALLOW,
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
+
         # --- CDK Provider (handles async CloudFormation response) ---
         provider = cr.Provider(
             self,
@@ -420,3 +549,16 @@ class AgentGateway(Construct):
     def gateway_mcp_url(self) -> str:
         """MCP URL for the agent to use when connecting to the Gateway."""
         return self._gateway_resource.get_att_string("GatewayUrl")
+
+    @property
+    def gateway_log_group_name(self) -> str:
+        """CloudWatch Logs group name receiving the Gateway's vended APPLICATION_LOGS.
+
+        AgentCore does not create this automatically for Gateway resources
+        (unlike Runtime, which gets a log group by default). See
+        architecture-guide.md / observability notes for why this is needed:
+        without it, outbound-auth errors (e.g. AccessDeniedException on the
+        credential provider's internal secret) are invisible except via
+        exceptionLevel=DEBUG probing of individual tool calls.
+        """
+        return self._gateway_resource.get_att_string("LogGroupName")
