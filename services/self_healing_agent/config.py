@@ -1,7 +1,7 @@
 """Configuration utilities for the Self-Healing Agent."""
 from collections.abc import Mapping
 
-DEFAULT_MODEL_ID = "eu.amazon.nova-pro-v1:0"
+DEFAULT_MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def resolve_model_id(env: Mapping[str, str]) -> str:

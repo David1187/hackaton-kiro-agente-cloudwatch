@@ -100,7 +100,7 @@ class _UvArm64Bundling:
 
 
 # Default model ID (configurable via environment variable MODEL_ID at runtime)
-DEFAULT_MODEL_ID = "eu.amazon.nova-pro-v1:0"
+DEFAULT_MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 # --- Custom Resource Lambda handler code for AgentCore Runtime management ---
