@@ -18,7 +18,7 @@ Cuando ocurra un error y sea necesario generar una solución, el diseño debe se
 
 - **Framework de Agentes:** Utilizar el SDK de `strands-agents` en Python.
 - **Entorno de Ejecución:** Amazon Bedrock AgentCore Runtime (entorno serverless administrado).
-- **Modelo LLM:** El identificador del modelo (`model_id`) **debe** ser configurable vía variable de entorno `MODEL_ID`, nunca hardcodeado, para permitir su cambio sin redeploy de código. El valor por defecto en ausencia de la variable es `qwen.qwen3-coder-30b-a3b-v1:0`.
+- **Modelo LLM:** El identificador del modelo (`model_id`) **debe** ser configurable vía variable de entorno `MODEL_ID`, nunca hardcodeado, para permitir su cambio sin redeploy de código. El valor por defecto en ausencia de la variable es `eu.anthropic.claude-haiku-4-5-20251001-v1:0` (inference profile eu-west-1).
 - **Protocolo de Herramientas:** Utilizar Model Context Protocol (MCP) para interactuar con GitHub.
 - **Conectividad Externa:** Apuntar al MCP remoto oficial de GitHub.
 - **Enrutamiento:** Conectar las llamadas mediante el AgentCore Gateway de AWS, que actúa como intermediario autenticado hacia el MCP remoto de GitHub.

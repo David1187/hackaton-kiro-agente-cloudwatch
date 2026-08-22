@@ -319,42 +319,11 @@ def handle_event(event: dict) -> dict:
             )
             tool_create_pr = _resolve_tool("github-mcp___create_pull_request")
 
-            # DIAGNOSTIC: log the input schema of each resolved tool so we can
-            # confirm the exact expected parameter names/requirements.
-            _tool_by_name = {
-                getattr(t, "tool_name", getattr(t, "name", "")): t for t in mcp_tools
-            }
-            for _tn in (tool_get_file, tool_create_branch, tool_write_file, tool_create_pr):
-                _t = _tool_by_name.get(_tn)
-                try:
-                    _spec = _t.tool_spec if _t is not None else None
-                    logger.info("TOOL SCHEMA %s: %s", _tn, json.dumps(_spec, default=str)[:1500])
-                except Exception as _e:
-                    logger.warning("Could not read tool_spec for %s: %s", _tn, _e)
-
             # LLM agent WITHOUT tools — pure text generation of the corrected file.
             codegen_agent = Agent(
                 model=bedrock_model,
                 system_prompt=CODE_FIX_SYSTEM_PROMPT,
             )
-
-            # DIAGNOSTIC: isolate whether the Gateway->GitHub path works at all.
-            # - get_me: no args, tests credentials/Gateway (returns JSON text).
-            # - get_file_contents path="/": directory listing (JSON text).
-            # - get_file_contents on the file: the currently-failing call (blob).
-            def _diag(label, tool, args):
-                try:
-                    r = mcp_client.call_tool_sync(
-                        tool_use_id=f"diag-{label}", name=tool, arguments=args
-                    )
-                    st = r.get("status") if isinstance(r, dict) else getattr(r, "status", None)
-                    logger.info("DIAG %s -> status=%s raw=%s", label, st, repr(r)[:600])
-                except Exception as _e:
-                    logger.warning("DIAG %s raised: %s", label, _e)
-
-            _diag("get_me", _resolve_tool("github-mcp___get_me"), {})
-            _diag("dir_list", tool_get_file, {"owner": "David1187", "repo": "hackaton-kiro-agente-cloudwatch", "path": "/"})
-            _diag("file", tool_get_file, {"owner": "David1187", "repo": "hackaton-kiro-agente-cloudwatch", "path": "services/crud_api/handlers/update_task.py"})
 
             # --- Parse the file path from the stack trace ---
             # Lambda runtime paths look like /var/task/handlers/update_task.py
@@ -420,7 +389,16 @@ def handle_event(event: dict) -> dict:
             REPO = "hackaton-kiro-agente-cloudwatch"
 
             def _mcp_call(tool_name: str, arguments: dict, retries: int = 4) -> tuple:
-                """Call an MCP tool and return (status, combined_text).
+                """Call an MCP tool and return (status, combined_text, content_blocks).
+
+                content_blocks is the raw list of MCP content items (may
+                include "resource" blocks in addition to "text" blocks — the
+                GitHub MCP server returns file contents as a "resource" block
+                alongside a "text" confirmation message like "successfully
+                downloaded text file (SHA: <sha>)", not as plain JSON text;
+                see github/github-mcp-server#607). Callers that need the
+                actual file content/sha must inspect content_blocks
+                themselves rather than relying solely on combined_text.
 
                 Retries on transient Gateway/MCP errors ("internal error",
                 "retry later", rate limiting), which the GitHub MCP surfaces
@@ -428,7 +406,7 @@ def handle_event(event: dict) -> dict:
                 """
                 import time as _time
 
-                status, text = None, ""
+                status, text, content_blocks = None, "", []
                 for attempt in range(retries):
                     res = mcp_client.call_tool_sync(
                         tool_use_id=f"{tool_name}-{int(timestamp.timestamp())}-{attempt}",
@@ -447,16 +425,14 @@ def handle_event(event: dict) -> dict:
                         if isinstance(b, dict) and "text" in b
                     )
                     if status == "success":
-                        return status, text
+                        return status, text, content_blocks
 
-                    # DIAGNOSTIC: surface the full raw result + arguments so the
-                    # real cause behind the generic "internal error" is visible.
                     logger.warning(
-                        "MCP tool '%s' non-success (status=%s). args=%s raw=%s",
+                        "MCP tool '%s' non-success (status=%s). args=%s text=%s",
                         tool_name,
                         status,
                         json.dumps(arguments, default=str)[:500],
-                        repr(res)[:1000],
+                        text[:500],
                     )
 
                     lowered = text.lower()
@@ -468,7 +444,7 @@ def handle_event(event: dict) -> dict:
                         or "timed out" in lowered
                     )
                     if not transient or attempt == retries - 1:
-                        return status, text
+                        return status, text, content_blocks
                     backoff = 2 ** attempt
                     logger.warning(
                         "MCP tool '%s' transient error (attempt %d/%d), retrying in %ds: %s",
@@ -479,37 +455,83 @@ def handle_event(event: dict) -> dict:
                         text[:200],
                     )
                     _time.sleep(backoff)
-                return status, text
+                return status, text, content_blocks
+
+            def _extract_file_contents(text: str, content_blocks: list) -> tuple:
+                """Extract (source_text, sha) from a get_file_contents response.
+
+                Handles both known response shapes:
+                1. Legacy/alternate: a single JSON text block like
+                   {"sha": "...", "content": "<base64>", "encoding": "base64"}.
+                2. Current github-mcp-server behavior: a "text" confirmation
+                   block ("successfully downloaded text file (SHA: <sha>)")
+                   plus a separate "resource" block carrying the actual file
+                   text/blob (see github/github-mcp-server#607 — the "resource"
+                   content type is not auto-unwrapped into text by the MCP
+                   client, so it must be read from content_blocks directly).
+                """
+                import base64 as _b64
+                import re as _re
+
+                source_text = text
+                sha = None
+
+                # Shape 1: single JSON block with sha/content/encoding.
+                try:
+                    meta = json.loads(text)
+                    if isinstance(meta, dict):
+                        sha = meta.get("sha")
+                        if meta.get("content"):
+                            if meta.get("encoding", "base64") == "base64":
+                                source_text = _b64.b64decode(meta["content"]).decode(
+                                    "utf-8", "replace"
+                                )
+                            else:
+                                source_text = meta["content"]
+                        return source_text, sha
+                except (ValueError, TypeError):
+                    pass  # Not a plain JSON blob — fall through to shape 2.
+
+                # Shape 2: "resource" content block(s) carry the real file
+                # content; the "text" block is just a confirmation message
+                # that may embed "(SHA: <sha>)".
+                for block in content_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    resource = block.get("resource")
+                    if isinstance(resource, dict):
+                        if resource.get("text") is not None:
+                            source_text = resource["text"]
+                        elif resource.get("blob"):
+                            try:
+                                source_text = _b64.b64decode(resource["blob"]).decode(
+                                    "utf-8", "replace"
+                                )
+                            except Exception:
+                                pass
+                        if resource.get("sha"):
+                            sha = resource["sha"]
+
+                if not sha:
+                    match = _re.search(r"\(SHA:\s*([0-9a-fA-F]{7,40})\)", text)
+                    if match:
+                        sha = match.group(1)
+
+                return source_text, sha
 
             # --- Step 1: Read the buggy file via MCP (deterministic) ---
-            status, file_text = _mcp_call(
+            status, file_text, file_blocks = _mcp_call(
                 tool_get_file, {"owner": OWNER, "repo": REPO, "path": file_path}
             )
             if status != "success":
                 raise RuntimeError(f"get_file_contents failed: {file_text[:500]}")
 
-            # GitHub MCP may return JSON metadata (base64 content + sha) or raw text.
-            current_source = file_text
-            file_sha = None
-            try:
-                meta = json.loads(file_text)
-                if isinstance(meta, dict):
-                    file_sha = meta.get("sha")
-                    if meta.get("content"):
-                        import base64 as _b64
-                        if meta.get("encoding", "base64") == "base64":
-                            current_source = _b64.b64decode(meta["content"]).decode(
-                                "utf-8", "replace"
-                            )
-                        else:
-                            current_source = meta["content"]
-            except (ValueError, TypeError):
-                pass  # Not JSON — treat the returned text as the raw file source
+            current_source, file_sha = _extract_file_contents(file_text, file_blocks)
 
             # Optionally read the shared repository module for extra context.
             common_context = ""
             if also_read_common:
-                c_status, c_text = _mcp_call(
+                c_status, c_text, c_blocks = _mcp_call(
                     tool_get_file,
                     {
                         "owner": OWNER,
@@ -518,17 +540,7 @@ def handle_event(event: dict) -> dict:
                     },
                 )
                 if c_status == "success":
-                    common_source = c_text
-                    try:
-                        c_meta = json.loads(c_text)
-                        if isinstance(c_meta, dict) and c_meta.get("content"):
-                            import base64 as _b64
-                            if c_meta.get("encoding", "base64") == "base64":
-                                common_source = _b64.b64decode(c_meta["content"]).decode(
-                                    "utf-8", "replace"
-                                )
-                    except (ValueError, TypeError):
-                        pass
+                    common_source, _common_sha = _extract_file_contents(c_text, c_blocks)
                     common_context = (
                         "\n\n=== SHARED MODULE (services/crud_api/common/repository.py, "
                         "for context only — apply the fix in the handler file) ===\n"
@@ -561,9 +573,9 @@ def handle_event(event: dict) -> dict:
                 raise RuntimeError("LLM produced an empty fixed source file")
 
             # --- Step 3: Create the fix branch from main (deterministic) ---
-            status, branch_out = _mcp_call(
+            status, branch_out, _branch_blocks = _mcp_call(
                 tool_create_branch,
-                {"owner": OWNER, "repo": REPO, "branch": branch_name, "from_ref": "main"},
+                {"owner": OWNER, "repo": REPO, "branch": branch_name, "from_branch": "main"},
             )
             if status != "success":
                 # Non-fatal: the branch may already exist from a previous run.
@@ -580,12 +592,12 @@ def handle_event(event: dict) -> dict:
             }
             if file_sha:
                 write_args["sha"] = file_sha
-            status, write_out = _mcp_call(tool_write_file, write_args)
+            status, write_out, _write_blocks = _mcp_call(tool_write_file, write_args)
             if status != "success":
                 raise RuntimeError(f"create_or_update_file failed: {write_out[:500]}")
 
             # --- Step 5: Open the Pull Request (never merge) ---
-            status, pr_out = _mcp_call(
+            status, pr_out, _pr_blocks = _mcp_call(
                 tool_create_pr,
                 {
                     "owner": OWNER,

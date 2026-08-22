@@ -148,6 +148,37 @@ def on_create(props):
     # automatically (unlike Runtime, which does). Without this, errors like
     # AccessDeniedException on the outbound credential fetch are invisible
     # outside exceptionLevel=DEBUG probing of individual tool calls.
+    log_delivery_data = _ensure_gateway_log_delivery(gateway_id, gateway_arn)
+
+    # Physical resource ID is the gateway ID (used in Delete)
+    return {
+        "PhysicalResourceId": gateway_id,
+        "Data": {
+            "GatewayId": gateway_id,
+            "GatewayArn": gateway_arn,
+            "GatewayUrl": gateway_url,
+            "TargetId": target_id,
+            "CredentialProviderArn": cred_provider_arn,
+            **log_delivery_data,
+        },
+    }
+
+
+def _ensure_gateway_log_delivery(gateway_id, gateway_arn):
+    \"\"\"Idempotently create/verify the log group + delivery pipeline for a Gateway.
+
+    Safe to call on every Create AND every Update: each underlying call
+    (create_log_group, put_delivery_source, put_delivery_destination) is
+    either a no-op-on-exists or an upsert. create_delivery is the one
+    exception — it errors if a delivery between the same source/destination
+    already exists, so that failure is caught and treated as "already set up".
+
+    This must run on Update too (not just Create) because CloudFormation
+    only invokes on_create for a resource once; once the Gateway physical
+    resource already exists, every subsequent `cdk deploy` calls on_update,
+    and log delivery must still be verified/created there for gateways that
+    existed before this logging feature was added.
+    \"\"\"
     log_group_name = f"/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/{gateway_id}"
     logs_client = boto3.client("logs")
     try:
@@ -155,6 +186,7 @@ def on_create(props):
         logger.info("Created log group: %s", log_group_name)
     except logs_client.exceptions.ResourceAlreadyExistsException:
         logger.info("Log group already exists: %s", log_group_name)
+
     log_group_arn = (
         f"arn:aws:logs:{boto3.session.Session().region_name}:"
         f"{boto3.client('sts').get_caller_identity()['Account']}:log-group:{log_group_name}"
@@ -162,6 +194,9 @@ def on_create(props):
 
     delivery_source_name = f"{gateway_id}-logs-source"
     delivery_destination_name = f"{gateway_id}-logs-destination"
+
+    # put_delivery_source and put_delivery_destination are upserts (PUT
+    # semantics) — safe to call every time.
     logs_client.put_delivery_source(
         name=delivery_source_name,
         logType="APPLICATION_LOGS",
@@ -173,33 +208,44 @@ def on_create(props):
         deliveryDestinationConfiguration={"destinationResourceArn": log_group_arn},
     )
     delivery_destination_arn = dest_resp["deliveryDestination"]["arn"]
-    delivery_resp = logs_client.create_delivery(
-        deliverySourceName=delivery_source_name,
-        deliveryDestinationArn=delivery_destination_arn,
-    )
-    delivery_id = delivery_resp["delivery"]["id"]
-    logger.info(
-        "Enabled gateway log delivery: source=%s destination=%s delivery=%s log_group=%s",
-        delivery_source_name,
-        delivery_destination_name,
-        delivery_id,
-        log_group_name,
-    )
 
-    # Physical resource ID is the gateway ID (used in Delete)
+    # create_delivery is NOT an upsert: calling it again for a source that
+    # already has a delivery to this destination raises an error. Treat
+    # that as "already configured" rather than failing the whole resource.
+    delivery_id = None
+    try:
+        delivery_resp = logs_client.create_delivery(
+            deliverySourceName=delivery_source_name,
+            deliveryDestinationArn=delivery_destination_arn,
+        )
+        delivery_id = delivery_resp["delivery"]["id"]
+        logger.info(
+            "Enabled gateway log delivery: source=%s destination=%s delivery=%s log_group=%s",
+            delivery_source_name,
+            delivery_destination_name,
+            delivery_id,
+            log_group_name,
+        )
+    except Exception as e:
+        logger.info(
+            "create_delivery skipped for source=%s (likely already exists): %s",
+            delivery_source_name,
+            e,
+        )
+        try:
+            existing = logs_client.describe_deliveries().get("deliveries", [])
+            for d in existing:
+                if d.get("deliverySourceName") == delivery_source_name:
+                    delivery_id = d["id"]
+                    break
+        except Exception as lookup_err:
+            logger.warning("Could not look up existing delivery id: %s", lookup_err)
+
     return {
-        "PhysicalResourceId": gateway_id,
-        "Data": {
-            "GatewayId": gateway_id,
-            "GatewayArn": gateway_arn,
-            "GatewayUrl": gateway_url,
-            "TargetId": target_id,
-            "CredentialProviderArn": cred_provider_arn,
-            "LogGroupName": log_group_name,
-            "DeliveryId": delivery_id,
-            "DeliverySourceName": delivery_source_name,
-            "DeliveryDestinationName": delivery_destination_name,
-        },
+        "LogGroupName": log_group_name,
+        "DeliveryId": delivery_id or "",
+        "DeliverySourceName": delivery_source_name,
+        "DeliveryDestinationName": delivery_destination_name,
     }
 
 
@@ -248,8 +294,23 @@ def on_update(event, props):
             "provider update."
         )
 
+    # Ensure gateway log delivery exists. This must run on Update too, not
+    # just Create, because CloudFormation only invokes on_create once per
+    # physical resource — Gateways created before this logging feature was
+    # added would otherwise never get their log group/delivery set up.
+    gateway_id = event["PhysicalResourceId"]
+    log_delivery_data = {}
+    try:
+        gw_resp = client.get_gateway(gatewayIdentifier=gateway_id)
+        gateway_arn = gw_resp.get("gatewayArn", "")
+        if gateway_arn:
+            log_delivery_data = _ensure_gateway_log_delivery(gateway_id, gateway_arn)
+    except Exception as e:
+        logger.warning("Failed to ensure gateway log delivery on update: %s", e)
+
     return {
         "PhysicalResourceId": event["PhysicalResourceId"],
+        "Data": log_delivery_data,
     }
 
 
