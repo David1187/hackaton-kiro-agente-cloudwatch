@@ -51,6 +51,7 @@ flowchart TB
     end
 
     subgraph Agent["Agente de Auto-reparación"]
+        BR["Bridge Lambda\n(traduce evento + invoke_agent_runtime)"]
         AC["Bedrock AgentCore Runtime\n(strands-agents, MODEL_ID env var)"]
         GW["AgentCore Gateway"]
     end
@@ -69,7 +70,8 @@ flowchart TB
     L -->|"logging.error(exc_info=True)"| CWL
     CWL --> MF --> AL
     AL -->|"Alarm State Change"| EB
-    EB -->|invoca| AC
+    EB -->|invoca| BR
+    BR -->|"invoke_agent_runtime (SDK)"| AC
 
     AC -->|"1. FilterLogEvents / Logs Insights"| CWL
     AC -->|"2. Lee tag github-repo"| L
@@ -81,7 +83,7 @@ flowchart TB
 ```
 
 **Leyenda del flujo del Agente:**
-1. La Alarm State Change llega al Agente vía EventBridge (solo metadata).
+1. La Alarm State Change llega a una Bridge Lambda vía EventBridge (solo metadata), que la traduce e invoca al Agente en AgentCore Runtime mediante el SDK (`invoke_agent_runtime`). EventBridge no soporta AgentCore Runtime como target nativo, por lo que esta Lambda puente es un componente obligatorio del flujo, no una capa opcional.
 2. El Agente consulta CloudWatch Logs para obtener el stack trace real.
 3. El Agente lee el tag `github-repo` de la Lambda afectada para resolver `owner/repo`.
 4. El Agente, a través de AgentCore Gateway (que inyecta el PAT desde Secrets Manager de forma efímera), invoca el MCP remoto de GitHub para leer el código, generar el parche, crear la rama `fix/auto-heal-{lambda}-{timestamp}` desde `main`, y abrir el Pull Request.
@@ -137,7 +139,7 @@ Todas las funciones Lambda destinadas al ciclo CRUD deben cumplir las siguientes
 
 Cada vez que generes código para el Agente, el ciclo autónomo de Razonamiento y Acción (ReAct) debe seguir estos pasos en orden:
 
-1. **Detectar:** CloudWatch Metric Filter (patrón `ERROR:`) sobre el Log Group de la Lambda dispara una CloudWatch Alarm. El cambio de estado de la alarma se publica como evento nativo en EventBridge, que invoca al Agente.
+1. **Detectar:** CloudWatch Metric Filter (patrón `ERROR:`) sobre el Log Group de la Lambda dispara una CloudWatch Alarm. El cambio de estado de la alarma se publica como evento nativo en EventBridge, que invoca una Bridge Lambda; esta traduce el evento e invoca al Agente en AgentCore Runtime mediante el SDK (`invoke_agent_runtime`), ya que EventBridge no soporta AgentCore Runtime como target nativo.
 2. **Analizar:** El evento de EventBridge trae únicamente metadata de la alarma (no el stack trace). El Agente debe consultar CloudWatch Logs (`FilterLogEvents` o Logs Insights) sobre el Log Group correspondiente para obtener el log de error más reciente y su stack trace completo.
 3. **Identificar el repositorio:** El Agente lee el tag `github-repo` de la Lambda involucrada para determinar el `owner/repo` exacto a corregir (ver sección 2.3).
 4. **Invocar** la herramienta del MCP remoto de GitHub (`repos.get_file_contents`) para leer el código fuente con el bug, dentro del repositorio identificado en el paso anterior.

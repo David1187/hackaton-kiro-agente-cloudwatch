@@ -59,10 +59,13 @@ table = dynamodb.Table(
 
 - Todos los despliegues de este proyecto se realizan en la región **`eu-west-1` (Irlanda)**. El entorno del `Stack` (`env=Environment(region="eu-west-1", ...)`) debe fijar esta región explícitamente; no depender de la región configurada por defecto en el entorno de quien ejecuta `cdk deploy`.
 - El despliegue usa el **perfil de AWS por defecto** (`default`) del entorno donde se ejecuta, no un perfil con nombre hardcodeado en el código.
-- Antes de cualquier despliegue real (`cdk deploy`), es obligatorio mostrar al usuario, y esperar confirmación explícita, de:
+- El despliegue está automatizado vía GitHub Actions (`.github/workflows/deploy.yml`), disparado en cada `push` a `main`. El job ejecuta `cdk synth --all` y `cdk diff --all` (saliendo el resultado a los logs del step y como artifact descargable `cdk-diff`) inmediatamente antes de `cdk deploy --all --require-approval never`. Es una decisión consciente de velocidad para el contexto del Hackathon: no hay gate manual de aprobación entre el `diff` y el `deploy` real, así que el `diff` queda como registro de auditoría post-hoc (útil para revisar qué cambió en cada ejecución), no como punto de confirmación bloqueante.
+  - Autenticación del workflow contra AWS vía OIDC (`aws-actions/configure-aws-credentials`), asumiendo el rol `github-actions` sin credenciales de larga duración almacenadas como secret.
+  - Si en algún momento se decide introducir un gate de aprobación humana antes del `deploy` (recomendado para un entorno post-hackathon), la vía estándar es un `environment` de GitHub con *required reviewers*, o separar el job en `plan`/`apply` con un paso de aprobación manual entre ambos.
+- Si se ejecuta un despliegue manual (`cdk deploy` local) fuera del workflow, sigue siendo obligatorio mostrar al usuario, y esperar confirmación explícita, de:
   1. Cuenta de AWS y región de destino (`eu-west-1`).
   2. Lista de recursos afectados y la acción sobre cada uno (crear, actualizar o eliminar), obtenida de `cdk diff` o del changeset de CloudFormation antes de ejecutar el despliegue.
-- Tras el despliegue, verificar que el stack quedó en un estado exitoso (`CREATE_COMPLETE`/`UPDATE_COMPLETE`). Si el despliegue falla, se debe diagnosticar la causa raíz (eventos de la stack, CloudTrail) e informar al usuario con el detalle del fallo, sin reintentar automáticamente ni revertir sin confirmación.
+- Tras el despliegue (automatizado o manual), verificar que el stack quedó en un estado exitoso (`CREATE_COMPLETE`/`UPDATE_COMPLETE`). El propio workflow valida esto en el step "Verify stack status". Si el despliegue falla, se debe diagnosticar la causa raíz (eventos de la stack, CloudTrail, logs del job de GitHub Actions) e informar al usuario con el detalle del fallo, sin reintentar automáticamente ni revertir sin confirmación.
 
 ## 7. Versionado del Stack
 
