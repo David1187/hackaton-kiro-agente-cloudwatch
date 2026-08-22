@@ -157,7 +157,50 @@ def on_create(props):
 
 
 def on_update(event, props):
-    \"\"\"Update is treated as no-op for hackathon simplicity.\"\"\"
+    \"\"\"Sync the API Key Credential Provider with the current secret value.
+
+    The credential provider stores its own copy of the API key at creation
+    time (create_api_key_credential_provider); it does NOT re-read Secrets
+    Manager on its own. If the GitHub PAT is rotated in Secrets Manager
+    after the gateway/provider already exist, every MCP call keeps using
+    the stale key unless this update explicitly pushes the new value via
+    update_api_key_credential_provider. Without this, GitHub silently
+    rejects the outdated PAT and the Gateway surfaces it as a generic
+    'An internal error occurred. Please retry later.' on every tool call.
+    \"\"\"
+    client = boto3.client("bedrock-agentcore-control")
+    sm_client = boto3.client("secretsmanager")
+
+    secret_resp = sm_client.get_secret_value(SecretId=props["SecretArn"])
+    secret_value = secret_resp.get("SecretString", "")
+    try:
+        parsed = json.loads(secret_value)
+        api_key_value = parsed.get("token", parsed.get("apiKey", secret_value))
+    except (json.JSONDecodeError, TypeError):
+        api_key_value = secret_value
+
+    if api_key_value and len(api_key_value) > 10:
+        try:
+            client.update_api_key_credential_provider(
+                name=props["CredentialProviderName"],
+                apiKey=api_key_value,
+            )
+            logger.info(
+                "Synced credential provider '%s' with current secret value",
+                props["CredentialProviderName"],
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update credential provider '%s' (non-fatal): %s",
+                props["CredentialProviderName"],
+                e,
+            )
+    else:
+        logger.warning(
+            "GitHub PAT secret is empty or placeholder; skipping credential "
+            "provider update."
+        )
+
     return {
         "PhysicalResourceId": event["PhysicalResourceId"],
     }
